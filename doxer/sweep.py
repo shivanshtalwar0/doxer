@@ -215,8 +215,17 @@ class SweepRunner:
             for plat in others:
                 self._act(f"checking {total} handles on {plat}…", "probe", "run", 30)
                 targets = [(plat, c) for c in cands]
-                for r in probe_usernames(targets, workers=workers):
+
+                def report_other(n, tot, batch, _plat=plat):
+                    pct2 = 30 + int(8 * n / max(1, tot))
+                    r = batch[0] if batch else {}
                     u = r.get("username", "?")
+                    if r.get("exists"):
+                        self._act(f"FOUND @{u} on {_plat}  ({n}/{tot})", "probe", "ok", pct2)
+                    else:
+                        self._act(f"@{u} — not found on {_plat}  ({n}/{tot})", "probe", "run", pct2)
+
+                for r in probe_usernames(targets, workers=workers, progress=report_other):
                     if r.get("exists"):
                         hits.append(dict(r))
                         self._act(f"FOUND @{u} on {plat}", "probe", "ok", 38)

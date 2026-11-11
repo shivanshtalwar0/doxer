@@ -226,7 +226,7 @@ def _probe_one(page, url: str) -> dict:
     return out
 
 
-def _probe_batch(browser, targets: list[tuple[str, str]]) -> list[dict]:
+def _probe_batch(browser, targets: list[tuple[str, str]], on_each=None) -> list[dict]:
     """Probe [(platform, username), ...] in one page. Sequential, order preserved."""
     page = browser.new_page()
     try:
@@ -235,7 +235,10 @@ def _probe_batch(browser, targets: list[tuple[str, str]]) -> list[dict]:
         for platform, username in targets:
             url = f"https://www.instagram.com/{username}/" if platform == "instagram" else f"https://www.threads.net/@{username}/"
             r = _probe_one(page, url)
-            out.append({"platform": platform, "username": username, "url": url, **r})
+            rec = {"platform": platform, "username": username, "url": url, **r}
+            out.append(rec)
+            if on_each:
+                on_each(rec)
         return out
     finally:
         page.close()
@@ -257,13 +260,18 @@ def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=N
 
     def worker(chunk: list[tuple[str, str]]) -> None:
         pool = BrowserPool()
-        try:
-            batch = pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60)
+
+        def on_each(rec: dict) -> None:
+            # report per handle, not per finished chunk, so the UI updates live
             with lock:
-                results.extend(batch)
-                done[0] += len(batch)
-                if progress:
-                    progress(done[0], len(targets), batch)
+                results.append(rec)
+                done[0] += 1
+                n = done[0]
+            if progress:
+                progress(n, len(targets), [rec])
+
+        try:
+            pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60, on_each=on_each)
         finally:
             pool.close()
 

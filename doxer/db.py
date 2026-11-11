@@ -498,23 +498,6 @@ def list_accounts() -> list[dict]:
 
 # --------------------------------------------------------- login challenges
 
-def init_challenge_table() -> None:
-    with _lock, _conn() as c:
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS login_challenges (
-                id TEXT PRIMARY KEY,
-                platform TEXT NOT NULL,
-                username TEXT NOT NULL,
-                kind TEXT NOT NULL,               -- email_code|sms_code|captcha|unknown
-                prompt TEXT DEFAULT '',
-                status TEXT NOT NULL,             -- waiting|submitted|expired|failed
-                answer TEXT DEFAULT '',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            )"""
-        )
-
-
 def new_challenge(platform: str, username: str, kind: str, prompt: str) -> str:
     cid = uuid.uuid4().hex[:10]
     now = time.time()
@@ -559,23 +542,6 @@ def set_challenge_status(cid: str, status: str) -> None:
 
 
 # ------------------------------------------------------- progress reporting
-
-def init_progress_table() -> None:
-    with _lock, _conn() as c:
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS progress (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scope TEXT NOT NULL,          -- login|sweep
-                ref TEXT NOT NULL,            -- login username or session id
-                step TEXT DEFAULT '',         -- machine-ish step key
-                label TEXT DEFAULT '',        -- human text shown in the UI
-                state TEXT DEFAULT 'run',     -- run|ok|warn|error
-                pct INTEGER DEFAULT 0,        -- 0..100 for the stage bar
-                created_at REAL NOT NULL
-            )"""
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS idx_progress_ref ON progress(scope, ref)")
-
 
 def log_progress(scope: str, ref: str, label: str, step: str = "", state: str = "run", pct: int = 0) -> int:
     with _lock, _conn() as c:

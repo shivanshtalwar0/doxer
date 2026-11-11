@@ -646,7 +646,12 @@ async function pollChecks() {
     for (const a of d.activity) {
       ACT_ID = Math.max(ACT_ID, a.id);
       renderAct(a);
-      if (a.state !== 'run') addActRow(a);
+      addActRow(a);
+    }
+    // prune old "running" rows that have been superseded, keep the history readable
+    const rows = $('#actfeed');
+    if (rows.children.length > 250) {
+      while (rows.children.length > 250) rows.lastChild.remove();
     }
     const last = d.activity[d.activity.length - 1];
     showCurrentAct(last);
