@@ -242,10 +242,10 @@ class SweepRunner:
                     else:
                         self._act(f"@{u} — not found on {_plat}  ({n}/{tot})", "probe", "run", pct2)
 
+                # report_other already logs each hit as it is found; just collect.
                 for r in probe_usernames(targets, workers=workers, progress=report_other):
                     if r.get("exists"):
                         hits.append(dict(r))
-                        self._act(f"FOUND @{u} on {plat}", "probe", "ok", 38)
         return hits
 
     def _index(self, username: str, max_photos: int, via: str = "probe") -> dict | None:

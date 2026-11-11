@@ -457,7 +457,7 @@ def profile_from_page(page) -> dict:
 
     try:
         srcs = page.eval_on_selector_all(
-            "img[src*='cdninstagram']", "els => els.map(e => e.currentSrc || e.src)"
+            "img[src*='cdninstagram'], img[src*='fbcdn.net']", "els => els.map(e => e.currentSrc || e.src)"
         )
         imgs = [s for s in srcs if s]
     except Exception:  # noqa: BLE001
@@ -728,9 +728,8 @@ def _related(browser, username: str, cookies: list[dict], limit: int) -> list[st
             pass
 
 
-def related_background(username: str) -> list[str]:
-    """Kept for symmetry; see _related."""
-    return related_accounts(username)
+def _scrape_authed(browser, username: str, cookies: list[dict]) -> dict:
+    """Load a profile page and extract name/bio/followers/photo URLs."""
     ctx = browser.new_context(user_agent=_UA, viewport={"width": 1366, "height": 900})
     if cookies:
         ctx.add_cookies(cookies)

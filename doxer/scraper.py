@@ -151,7 +151,7 @@ def _scrape_instagram(browser, username: str, full_images: int):
         page.set_viewport_size({"width": 1366, "height": 900})
         page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT)
         try:
-            page.wait_for_selector("img[src*='cdninstagram']", timeout=20_000)
+            page.wait_for_selector("img[src*='cdninstagram'], img[src*='fbcdn.net']", timeout=20_000)
         except Exception:  # noqa: BLE001
             pass
         page.wait_for_timeout(2500)
@@ -167,7 +167,7 @@ def _scrape_instagram(browser, username: str, full_images: int):
         except Exception:  # noqa: BLE001
             pass
 
-        imgs = _collect(page, ["img[src*='cdninstagram']"])
+        imgs = _collect(page, ["img[src*='cdninstagram'], img[src*='fbcdn.net']"])
         post_hrefs = []
         try:
             post_hrefs = page.eval_on_selector_all(
@@ -302,7 +302,7 @@ def _scrape_threads(browser, username: str):
         page.set_viewport_size({"width": 1366, "height": 900})
         page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT)
         try:
-            page.wait_for_selector("img[src*='cdninstagram'], img[src*='fbsbx']", timeout=20_000)
+            page.wait_for_selector("img[src*='cdninstagram'], img[src*='fbcdn.net'], img[src*='fbsbx']", timeout=20_000)
         except Exception:  # noqa: BLE001
             pass
         page.wait_for_timeout(2500)
@@ -318,7 +318,7 @@ def _scrape_threads(browser, username: str):
         except Exception:  # noqa: BLE001
             pass
 
-        imgs = _collect(page, ["img[src*='cdninstagram']", "img[src*='fbsbx']"])
+        imgs = _collect(page, ["img[src*='cdninstagram'], img[src*='fbcdn.net']", "img[src*='fbsbx']"])
     finally:
         page.close()
     return {
