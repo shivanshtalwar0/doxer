@@ -133,6 +133,33 @@ def init() -> None:
                 updated_at REAL NOT NULL,
                 UNIQUE(platform, username)
             );
+
+            -- A verification step an interactive login is blocked on
+            -- (email/SMS code, captcha). The browser waits for the answer.
+            CREATE TABLE IF NOT EXISTS login_challenges (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                username TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                prompt TEXT DEFAULT '',
+                status TEXT NOT NULL,
+                answer TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            -- Step-by-step progress for long interactive operations (login).
+            CREATE TABLE IF NOT EXISTS progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                ref TEXT NOT NULL,
+                step TEXT DEFAULT '',
+                label TEXT DEFAULT '',
+                state TEXT DEFAULT 'run',
+                pct INTEGER DEFAULT 0,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_progress_ref ON progress(scope, ref);
             """
         )
 
@@ -432,3 +459,107 @@ def list_accounts() -> list[dict]:
             "LENGTH(cookies) AS cookie_len FROM accounts ORDER BY updated_at DESC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------- login challenges
+
+def init_challenge_table() -> None:
+    with _lock, _conn() as c:
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS login_challenges (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                username TEXT NOT NULL,
+                kind TEXT NOT NULL,               -- email_code|sms_code|captcha|unknown
+                prompt TEXT DEFAULT '',
+                status TEXT NOT NULL,             -- waiting|submitted|expired|failed
+                answer TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )"""
+        )
+
+
+def new_challenge(platform: str, username: str, kind: str, prompt: str) -> str:
+    cid = uuid.uuid4().hex[:10]
+    now = time.time()
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT INTO login_challenges(id,platform,username,kind,prompt,status,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (cid, platform, username, kind, prompt, "waiting", now, now),
+        )
+    return cid
+
+
+def get_challenge(cid: str) -> Optional[dict]:
+    with _lock, _conn() as c:
+        row = c.execute("SELECT * FROM login_challenges WHERE id=?", (cid,)).fetchone()
+    return dict(row) if row else None
+
+
+def pending_challenge(platform: str = "instagram") -> Optional[dict]:
+    """Most recent challenge still waiting for an answer."""
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM login_challenges WHERE platform=? AND status='waiting'"
+            " ORDER BY created_at DESC LIMIT 1",
+            (platform,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def answer_challenge(cid: str, answer: str) -> bool:
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE login_challenges SET answer=?, status='submitted', updated_at=? WHERE id=? AND status='waiting'",
+            (answer, time.time(), cid),
+        )
+        return cur.rowcount > 0
+
+
+def set_challenge_status(cid: str, status: str) -> None:
+    with _lock, _conn() as c:
+        c.execute("UPDATE login_challenges SET status=?, updated_at=? WHERE id=?", (status, time.time(), cid))
+
+
+# ------------------------------------------------------- progress reporting
+
+def init_progress_table() -> None:
+    with _lock, _conn() as c:
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,          -- login|sweep
+                ref TEXT NOT NULL,            -- login username or session id
+                step TEXT DEFAULT '',         -- machine-ish step key
+                label TEXT DEFAULT '',        -- human text shown in the UI
+                state TEXT DEFAULT 'run',     -- run|ok|warn|error
+                pct INTEGER DEFAULT 0,        -- 0..100 for the stage bar
+                created_at REAL NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_progress_ref ON progress(scope, ref)")
+
+
+def log_progress(scope: str, ref: str, label: str, step: str = "", state: str = "run", pct: int = 0) -> int:
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO progress(scope,ref,step,label,state,pct,created_at) VALUES(?,?,?,?,?,?,?)",
+            (scope, ref, step, label, state, max(0, min(100, int(pct))), time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def list_progress(scope: str, ref: str, after: int = 0, limit: int = 200) -> list[dict]:
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM progress WHERE scope=? AND ref=? AND id>? ORDER BY id LIMIT ?",
+            (scope, ref, after, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_progress(scope: str, ref: str) -> None:
+    with _lock, _conn() as c:
+        c.execute("DELETE FROM progress WHERE scope=? AND ref=?", (scope, ref))

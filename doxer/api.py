@@ -16,6 +16,12 @@ class LoginBody(BaseModel):
     platform: str = "instagram"
     username: str
     password: str
+    visible: bool = False
+    wait_seconds: int = 420
+
+
+class ChallengeAnswer(BaseModel):
+    code: str
 
 
 class SweepBody(BaseModel):
@@ -113,11 +119,34 @@ def create_app(pipeline) -> FastAPI:
 
     @app.post("/api/accounts/login")
     def accounts_login(body: LoginBody):
-        """Verify credentials by actually logging in, and persist the cookies."""
-        from .instagram import Checkpoint, LoginRequired, login
+        """Verify credentials by actually logging in, and persist the cookies.
+
+        With visible=true a real browser window opens so captchas or an emailed
+        verification code can be completed. That takes minutes, so it runs on a
+        worker thread and the UI polls /api/accounts/challenge + /api/accounts.
+        """
+        from .instagram import Checkpoint, LoginRequired, login, login_visible
         from .scraper import BrowserPool
 
-        db.upsert_account(body.platform, body.username, body.password, "", "new")
+        db.upsert_account(body.platform, body.username, body.password, "", "pending")
+
+        if body.visible:
+            def run_visible():
+                import json as _json
+
+                try:
+                    ok, msg, cookies = login_visible(body.username, body.password,
+                                                     wait_seconds=body.wait_seconds)
+                except Exception as e:  # noqa: BLE001
+                    db.upsert_account(body.platform, body.username, "", "", "failed",
+                                      f"{type(e).__name__}: {e}")
+                    return
+                db.upsert_account(body.platform, body.username, "", _json.dumps(cookies),
+                                  "ok" if ok else "failed", "" if ok else msg)
+
+            threading.Thread(target=run_visible, daemon=True).start()
+            return {"async": True, "message": "browser window opening — watch it, and enter the code here if asked"}
+
         pool = BrowserPool()
         try:
             ok, msg, cookies = pool.call(login, body.username, body.password, timeout=180)
@@ -133,6 +162,42 @@ def create_app(pipeline) -> FastAPI:
         if not ok:
             raise HTTPException(400, msg)
         return {"ok": True, "message": msg, "cookies": len(cookies)}
+
+    # ------------------------------------------------- login verification
+
+    @app.get("/api/accounts/challenge")
+    def current_challenge(platform: str = "instagram"):
+        """Is an interactive login waiting for a verification code?"""
+        ch = db.pending_challenge(platform)
+        if not ch:
+            return {"pending": False}
+        return {"pending": True, **ch}
+
+    @app.get("/api/accounts/progress")
+    def login_progress(platform: str = "instagram", after: int = 0):
+        """Live step log for the most recent login attempt."""
+        acct = db.get_account(platform)
+        user = (acct or {}).get("username", "")
+        if not user:
+            return {"steps": [], "done": True}
+        steps = db.list_progress("login", user, after=after)
+        last = steps[-1] if steps else None
+        return {
+            "username": user,
+            "steps": steps,
+            "done": bool(last and last["step"] in ("done", "error", "timeout")),
+            "pct": last["pct"] if last else 0,
+            "status": (acct or {}).get("status", ""),
+        }
+
+    @app.post("/api/accounts/challenge/{cid}")
+    def submit_challenge(cid: str, body: ChallengeAnswer):
+        ch = db.get_challenge(cid)
+        if not ch:
+            raise HTTPException(404, "no such challenge")
+        if not db.answer_challenge(cid, body.code.strip()):
+            raise HTTPException(409, "that challenge is no longer waiting")
+        return {"ok": True, "id": cid}
 
     # -------------------------------------------------------------- sweeps
 

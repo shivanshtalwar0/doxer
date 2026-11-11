@@ -163,6 +163,24 @@
   .rtable img { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; display: block; }
   .tag { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; background: var(--panel2); color: var(--dim); margin-left: 5px; }
   .scorecell { font-variant-numeric: tabular-nums; font-weight: 700; }
+
+  /* login step list */
+  .steps { display: flex; flex-direction: column; gap: 1px; max-height: 260px; overflow-y: auto; }
+  .step { display: flex; align-items: baseline; gap: 8px; font-size: 12px; padding: 3px 0; color: var(--dim); }
+  .step .dot {
+    width: 7px; height: 7px; border-radius: 50%; flex: none; margin-top: 4px;
+    background: var(--dim);
+  }
+  .step.run .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  .step.ok .dot { background: var(--good); }
+  .step.warn .dot { background: var(--mid); }
+  .step.error .dot { background: var(--low); }
+  .step.run .lbl { color: var(--text); }
+  .step.ok .lbl { color: var(--dim); }
+  .step.warn .lbl { color: var(--mid); font-weight: 600; }
+  .step.error .lbl { color: var(--low); font-weight: 600; }
+  .step .t { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 11px; opacity: .65; flex: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 </style>
 </head>
 <body>
@@ -185,9 +203,30 @@
       </div>
       <div class="row">
         <button id="loginbtn" onclick="doLogin()">Connect</button>
-        <span class="hint" style="margin:0">stored locally · cookies reused</span>
+        <label style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;font-size:12.5px">
+          <input type="checkbox" id="igvisible" style="width:auto;margin:0"> show browser
+        </label>
       </div>
+      <div class="hint" style="margin-top:6px">“show browser” opens a real Chromium window so you can see each step and solve a captcha by hand.</div>
       <div id="loginmsg"></div>
+
+      <div id="loginprogress" style="display:none;margin-top:12px">
+        <div style="height:4px;background:var(--line);border-radius:99px;overflow:hidden;margin-bottom:9px">
+          <i id="loginbar" style="display:block;height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .4s ease"></i>
+        </div>
+        <div id="loginsteps" class="steps"></div>
+      </div>
+
+      <div id="codepanel" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--mid);border-radius:10px;background:rgba(251,191,36,.06)">
+        <div style="font-size:12.5px;font-weight:600;color:var(--mid);margin-bottom:6px">● Instagram wants a verification code</div>
+        <div id="codeprompt" class="hint" style="margin:0 0 8px"></div>
+        <div class="row">
+          <input type="text" id="codeinput" placeholder="enter the code" inputmode="numeric" spellcheck="false"
+                 style="flex:1;font-size:16px;letter-spacing:3px;text-align:center" autocomplete="one-time-code">
+          <button onclick="submitCode()">Submit</button>
+        </div>
+        <div id="codemsg"></div>
+      </div>
     </div>
 
     <div class="card" style="margin-top:16px">
@@ -332,20 +371,128 @@ async function loadAccounts() {
 async function doLogin() {
   const username = $('#iguser').value.trim();
   const password = $('#igpass').value;
+  const visible = $('#igvisible').checked;
   if (!username || !password) { $('#loginmsg').innerHTML = '<div class="err">username and password required</div>'; return; }
   $('#loginbtn').disabled = true;
-  $('#loginmsg').innerHTML = '<div class="job"><div class="spin"></div><span>logging in…</span></div>';
+  $('#loginbar').style.width = '0';
+  $('#loginbar').style.background = 'var(--accent)';
+  $('#loginmsg').innerHTML = visible
+    ? '<div class="job"><div class="spin"></div><span>browser window opening — steps appear below</span></div>'
+    : '<div class="job"><div class="spin"></div><span>logging in…</span></div>';
   try {
     const r = await api('/api/accounts/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'instagram', username, password })
+      body: JSON.stringify({ platform: 'instagram', username, password, visible, wait_seconds: 420 })
     });
-    $('#loginmsg').innerHTML = `<div class="hint" style="color:var(--good)">● connected (${r.cookies} cookies)</div>`;
-    $('#igpass').value = '';
-    loadAccounts();
+    if (r.async) {
+      startLoginWatch();
+    } else {
+      $('#loginmsg').innerHTML = `<div class="hint" style="color:var(--good)">● connected (${r.cookies} cookies)</div>`;
+      $('#igpass').value = '';
+      loadAccounts();
+      $('#loginbtn').disabled = false;
+    }
   } catch (e) {
     $('#loginmsg').innerHTML = `<div class="err">${esc(e.message)}</div>`;
-  } finally { $('#loginbtn').disabled = false; }
+    $('#loginbtn').disabled = false;
+  }
+}
+
+let WATCH = null, CURC = null, LASTSTEP = 0, LOGINT0 = 0;
+
+function startLoginWatch() {
+  clearInterval(WATCH);
+  LASTSTEP = 0;
+  LOGINT0 = Date.now();
+  $('#loginprogress').style.display = 'block';
+  $('#loginsteps').innerHTML = '';
+  $('#loginbar').style.width = '2%';
+
+  WATCH = setInterval(async () => {
+    // live step log
+    try {
+      const pr = await api('/api/accounts/progress?after=' + LASTSTEP);
+      if (pr.steps && pr.steps.length) {
+        for (const s of pr.steps) {
+          LASTSTEP = Math.max(LASTSTEP, s.id);
+          renderStep(s);
+        }
+      }
+      if (pr.pct) $('#loginbar').style.width = Math.max(2, pr.pct) + '%';
+    } catch (e) { /* ignore */ }
+
+    // a challenge waiting for a code?
+    try {
+      const c = await api('/api/accounts/challenge');
+      if (c.pending && c.id !== CURC) {
+        CURC = c.id;
+        $('#codepanel').style.display = 'block';
+        $('#codeprompt').textContent = c.prompt || 'Enter the code Instagram sent you.';
+        $('#codeinput').value = '';
+        $('#codemsg').innerHTML = '';
+        $('#codeinput').focus();
+        startLoginWatch.tick && startLoginWatch.tick();
+      } else if (!c.pending && CURC) {
+        $('#codepanel').style.display = 'none';
+        CURC = null;
+      }
+    } catch (e) { /* ignore */ }
+
+    // did the login finish?
+    try {
+      const accts = await api('/api/accounts');
+      const ig = accts.find(a => a.platform === 'instagram');
+      if (!ig) return;
+      if (ig.status === 'ok') {
+        clearInterval(WATCH); WATCH = null;
+        $('#loginbar').style.width = '100%';
+        $('#loginbar').style.background = 'var(--good)';
+        $('#codepanel').style.display = 'none'; CURC = null;
+        $('#loginmsg').innerHTML = '<div class="hint" style="color:var(--good)">● connected — cookies saved</div>';
+        $('#igpass').value = '';
+        $('#loginbtn').disabled = false;
+        loadAccounts();
+      } else if (ig.status === 'failed' || ig.status === 'checkpoint') {
+        clearInterval(WATCH); WATCH = null;
+        $('#loginbar').style.background = 'var(--low)';
+        $('#loginmsg').innerHTML = `<div class="err">${esc(ig.last_error || ig.status)}</div>`;
+        $('#loginbtn').disabled = false;
+        loadAccounts();
+      } else {
+        loadAccounts();
+      }
+    } catch (e) { /* ignore */ }
+  }, 1500);
+}
+
+function renderStep(s) {
+  const box = $('#loginsteps');
+  // tear down the previous "running" row so only the current step pulses
+  box.querySelectorAll('.step.run').forEach(el => el.classList.replace('run', 'ok'));
+  const d = document.createElement('div');
+  d.className = 'step ' + (s.state || 'run');
+  const secs = Math.max(0, Math.floor((Date.now() - LOGINT0) / 1000));
+  const t = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+  d.innerHTML = `<span class="dot"></span><span class="lbl">${esc(s.label)}</span><span class="t">${t}</span>`;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function submitCode() {
+  const code = $('#codeinput').value.trim();
+  if (!code || !CURC) return;
+  try {
+    await api(`/api/accounts/challenge/${CURC}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    });
+    $('#codemsg').innerHTML = '<div class="hint" style="color:var(--good)">● code sent to the browser — verifying…</div>';
+    $('#codeinput').value = '';
+    $('#codepanel').style.display = 'none';
+    CURC = null;
+  } catch (e) {
+    $('#codemsg').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
 }
 
 // ------------------------------------------------------------ platforms
@@ -367,6 +514,8 @@ fileInput.onchange = () => handleFile(fileInput.files[0]);
 ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
+
+$('#codeinput').addEventListener('keydown', e => { if (e.key === 'Enter') submitCode(); });
 
 // ------------------------------------------------------------ run sweep
 async function startSweep() {
