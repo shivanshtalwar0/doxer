@@ -116,6 +116,7 @@ def init() -> None:
                 n_faces INTEGER DEFAULT 0,
                 best_score REAL DEFAULT 0,
                 matched INTEGER DEFAULT 0,
+                stage TEXT DEFAULT 'done',
                 checked_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_sc_session ON session_checks(session_id);
@@ -162,6 +163,25 @@ def init() -> None:
             CREATE INDEX IF NOT EXISTS idx_progress_ref ON progress(scope, ref);
             """
         )
+        # --- migrations for tables created by earlier versions
+        _migrate(c)
+
+
+def _migrate(c) -> None:
+    """Add columns that older databases are missing (CREATE TABLE IF NOT EXISTS won't)."""
+    wanted = {
+        "session_checks": [("stage", "TEXT DEFAULT 'done'")],
+        "sessions": [],
+        "session_profiles": [],
+    }
+    for table, cols in wanted.items():
+        try:
+            existing = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        except Exception:  # noqa: BLE001
+            continue
+        for name, decl in cols:
+            if name not in existing:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def new_job(kind: str) -> str:
@@ -397,16 +417,31 @@ def add_session_check(
     n_faces: int = 0,
     best_score: float = 0.0,
     matched: bool = False,
+    stage: str = "done",
 ) -> int:
     with _lock, _conn() as c:
         cur = c.execute(
             """INSERT INTO session_checks(session_id,profile_id,image_path,face_thumb,thumb_b64,
-                                          n_faces,best_score,matched,checked_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
+                                          n_faces,best_score,matched,stage,checked_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (session_id, profile_id, image_path, face_thumb, thumb_b64, n_faces, best_score,
-             1 if matched else 0, time.time()),
+             1 if matched else 0, stage, time.time()),
         )
         return int(cur.lastrowid)
+
+
+def update_session_check(cid: int, **fields) -> None:
+    allowed = {"n_faces", "best_score", "matched", "stage", "thumb_b64"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(cid)
+    with _lock, _conn() as c:
+        c.execute(f"UPDATE session_checks SET {', '.join(sets)} WHERE id=?", vals)
 
 
 def list_session_checks(sid: str, after_id: int = 0, limit: int = 200) -> list[dict]:

@@ -550,8 +550,12 @@ def ensure_login(progress=None) -> list[dict]:
         pool.close()
 
 
-def probe_authed(usernames: list[str], workers: int = 2, progress=None) -> list[dict]:
-    """Probe usernames with an authenticated browser."""
+def probe_authed(usernames: list[str], workers: int = 2, progress=None, on_result=None) -> list[dict]:
+    """Probe usernames with an authenticated browser.
+
+    on_result(done, total, rec) is called as each handle finishes, so a caller
+    can report live "checking @x (12/184)" progress.
+    """
     cookies = ensure_login(progress=progress)
     if not usernames:
         return []
@@ -559,11 +563,21 @@ def probe_authed(usernames: list[str], workers: int = 2, progress=None) -> list[
     chunks = [usernames[i::workers] for i in range(workers)]
     results: list[dict] = []
     lock = threading.Lock()
+    done = [0]
+    total = len(usernames)
 
     def run(chunk):
         pool = BrowserPool()
+
+        def emit(rec):
+            with lock:
+                done[0] += 1
+                n = done[0]
+            if on_result:
+                on_result(n, total, rec)
+
         try:
-            batch = pool.call(_probe_authed, chunk, cookies, timeout=90 * len(chunk) + 60)
+            batch = pool.call(_probe_authed, chunk, cookies, timeout=90 * len(chunk) + 60, progress=emit)
             with lock:
                 results.extend(batch)
         finally:

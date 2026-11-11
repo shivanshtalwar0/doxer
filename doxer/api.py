@@ -245,8 +245,8 @@ def create_app(pipeline) -> FastAPI:
         return s
 
     @app.get("/api/sessions/{sid}/checks")
-    def session_checks(sid: str, after: int = 0, limit: int = 60):
-        """Poll for images examined since `after` — this drives the live feed."""
+    def session_checks(sid: str, after: int = 0, limit: int = 60, act_after: int = 0):
+        """Poll for images examined and activity lines since the given ids."""
         s = db.get_session(sid)
         if not s:
             raise HTTPException(404, "no such session")
@@ -260,6 +260,7 @@ def create_app(pipeline) -> FastAPI:
             "n_faces": s["n_faces"],
             "best_score": s["best_score"],
             "checks": db.list_session_checks(sid, after_id=after, limit=limit),
+            "activity": db.list_progress("sweep", sid, after=act_after, limit=80),
         }
 
     @app.post("/api/sessions/{sid}/cancel")

@@ -80,6 +80,18 @@ class FaceEngine:
         interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
         return cv2.resize(crop, (nw, nh), interpolation=interp)
 
+    @staticmethod
+    def shrink(bgr: np.ndarray, max_side: int = 520) -> np.ndarray:
+        """Downscale a whole image for the live preview (keeps it small enough to stream)."""
+        if bgr is None or not getattr(bgr, "size", 0):
+            return bgr
+        h, w = bgr.shape[:2]
+        longest = max(h, w)
+        if longest <= max_side:
+            return bgr
+        scale = max_side / float(longest)
+        return cv2.resize(bgr, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+
     def detect(self, bgr: np.ndarray) -> list[DetectedFace]:
         faces: list[DetectedFace] = []
         for f in self.app.get(bgr):

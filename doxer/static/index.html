@@ -143,6 +143,7 @@
   }
   .strip .hit { border-color: var(--good); box-shadow: 0 0 0 1px var(--good) inset; }
   .strip .cur { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+  .strip .pending { border-color: var(--accent); opacity: .55; animation: pulse 1.1s ease-in-out infinite; }
 
   /* session log */
   .log { max-height: 230px; overflow-y: auto; font-size: 12px; }
@@ -181,6 +182,22 @@
   .step.error .lbl { color: var(--low); font-weight: 600; }
   .step .t { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 11px; opacity: .65; flex: none; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+  /* current-action banner: the single most important "what is it doing now" line */
+  .currentact {
+    display: flex; align-items: center; gap: 9px; margin-top: 9px; padding: 9px 12px;
+    background: rgba(110,168,254,.06); border: 1px solid rgba(110,168,254,.28);
+    border-radius: 9px; font-size: 13px; color: var(--text); min-height: 38px;
+  }
+  .currentact .cdot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none;
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  .currentact .t { margin-left: auto; color: var(--dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .currentact.idle { background: transparent; border-color: var(--line); color: var(--dim); }
+  .currentact.idle .cdot { background: var(--dim); animation: none; }
+  .currentact.hit { border-color: rgba(74,222,128,.5); background: rgba(74,222,128,.07); }
+  .currentact.hit .cdot { background: var(--good); animation: none; }
 </style>
 </head>
 <body>
@@ -297,8 +314,13 @@
         <div class="nowmeta" id="nowmeta" style="display:none"></div>
       </div>
 
+      <div class="currentact" id="currentact">
+        <span class="cdot"></span><span id="curtext">idle</span>
+        <span class="t" id="curt"></span>
+      </div>
+
       <div class="strip" id="strip"></div>
-      <div class="log" id="log"><div class="empty" style="padding:16px 0">no activity yet</div></div>
+      <div class="steps" id="actfeed"><div class="empty" style="padding:14px 0">no activity yet</div></div>
     </div>
 
     <div class="card" style="margin-top:16px">
@@ -347,7 +369,7 @@ async function refresh() {
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // ---------------------------------------------------------------- state
-let SID = null, POLL = null, LAST_ID = 0, PHOTO = null, RUNNING = false;
+let SID = null, POLL = null, LAST_ID = 0, ACT_ID = 0, PHOTO = null, RUNNING = false, T0 = 0;
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 function band(s) { return s >= .6 ? 'strong' : (s >= .45 ? 'possible' : 'weak'); }
@@ -535,7 +557,10 @@ async function startSweep() {
   $('#nowmeta').style.display = 'none';
   $('#nowidle').style.display = 'block';
   $('#nowidle').textContent = 'starting…';
-  LAST_ID = 0;
+  LAST_ID = 0; ACT_ID = 0; T0 = Date.now();
+  $('#actfeed').innerHTML = '';
+  $('#curtext').textContent = 'starting…';
+  $('#currentact').className = 'currentact';
   setStage('probing');
 
   try {
@@ -560,7 +585,7 @@ async function startSweep() {
     SID = r.session;
     POLL = setInterval(pollChecks, 1200);
   } catch (e) {
-    addLog(`error: ${e.message}`);
+    addActRow({label: 'error: ' + e.message, state: 'error', step: 'error'});
     finishRun();
   }
 }
@@ -588,20 +613,10 @@ function setStage(stage) {
   $('#stageval').textContent = stage || 'idle';
 }
 
-function addLog(html) {
-  const log = $('#log');
-  if (log.querySelector('.empty')) log.innerHTML = '';
-  const d = document.createElement('div');
-  d.className = 'row2';
-  d.innerHTML = html;
-  log.prepend(d);
-  while (log.children.length > 300) log.lastChild.remove();
-}
-
 async function pollChecks() {
   if (!SID) return;
   let d;
-  try { d = await api(`/api/sessions/${SID}/checks?after=${LAST_ID}&limit=40`); }
+  try { d = await api(`/api/sessions/${SID}/checks?after=${LAST_ID}&limit=40&act_after=${ACT_ID}`); }
   catch (e) { return; }
 
   setStage(d.stage);
@@ -611,20 +626,32 @@ async function pollChecks() {
     + `<span class="val">${d.n_images || 0}</span> images · `
     + `<span class="val ${bcls(d.best_score)}">${pct(d.best_score)}%</span> best`;
 
+  if (d.activity && d.activity.length) {
+    for (const a of d.activity) {
+      ACT_ID = Math.max(ACT_ID, a.id);
+      renderAct(a);
+      if (a.state !== 'run') addActRow(a);
+    }
+    const last = d.activity[d.activity.length - 1];
+    showCurrentAct(last);
+  }
+
   if (d.checks && d.checks.length) {
     for (const c of d.checks) {
       LAST_ID = Math.max(LAST_ID, c.id);
       showCurrent(c);
-      addLog(
-        `<span class="sc ${bcls(c.best_score)}">${pct(c.best_score)}%</span>`
-        + `<span class="u">${esc((c.profile_id || '').replace('instagram_', '@'))}</span>`
-        + `<span style="color:var(--dim);margin-left:auto">${c.n_faces} face${c.n_faces === 1 ? '' : 's'}</span>`
-      );
-      const img = document.createElement('img');
-      img.src = c.thumb_b64 ? `data:image/jpeg;base64,${c.thumb_b64}` : '';
-      if (c.best_score >= .45) img.className = 'hit';
-      $('#strip').prepend(img);
-      while ($('#strip').children.length > 80) $('#strip').lastChild.remove();
+      // one strip cell per image, keyed by id so it can be upgraded in place
+      let cell = $('#strip [data-cid="' + c.id + '"]');
+      if (!cell) {
+        cell = document.createElement('img');
+        cell.dataset.cid = c.id;
+        $('#strip').prepend(cell);
+        while ($('#strip').children.length > 80) $('#strip').lastChild.remove();
+      }
+      cell.src = c.thumb_b64 ? `data:image/jpeg;base64,${c.thumb_b64}` : '';
+      cell.className = (c.stage === 'detecting' ? 'pending' : (c.best_score >= .45 ? 'hit' : ''));
+      cell.title = (c.profile_id || '').replace('instagram_', '@') + ' · ' +
+        (c.stage === 'detecting' ? 'detecting…' : c.n_faces + ' faces · ' + pct(c.best_score) + '%');
     }
   }
 
@@ -633,9 +660,52 @@ async function pollChecks() {
     if (d.status === 'done' || d.status === 'cancelled' || d.status === 'error') {
       loadResults();
       refresh();
-      if (d.message) addLog(`<span style="color:var(--dim)">${esc(d.message)}</span>`);
+      if (d.message) addActRow({label: d.message, state: d.status === 'done' ? 'ok' : 'warn', step: 'done'});
     }
   }
+}
+
+function elapsed() {
+  if (!T0) return '';
+  const s = Math.max(0, Math.floor((Date.now() - T0) / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function renderAct(a) {
+  // banner shows the newest running line
+  if (a.state === 'run' && !/^FOUND/.test(a.label)) {
+    $('#curtext').textContent = a.label;
+    $('#currentact').className = 'currentact';
+    $('#curt').textContent = elapsed();
+  }
+}
+
+function showCurrentAct(a) {
+  if (!a) return;
+  const isFind = /^FOUND/.test(a.label);
+  const finished = a.step === 'done';
+  if (finished) {
+    $('#curtext').textContent = a.label;
+    $('#currentact').className = 'currentact' + (a.state === 'ok' ? ' hit' : '');
+    $('#curt').textContent = elapsed();
+  } else if (isFind) {
+    $('#currentact').className = 'currentact hit';
+    $('#curt').textContent = elapsed();
+  } else if (a.state === 'run') {
+    $('#curtext').textContent = a.label;
+    $('#currentact').className = 'currentact';
+    $('#curt').textContent = elapsed();
+  }
+}
+
+function addActRow(a) {
+  const box = $('#actfeed');
+  if (box.querySelector('.empty')) box.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'step ' + (a.state || 'run');
+  d.innerHTML = `<span class="dot"></span><span class="lbl">${esc(a.label)}</span><span class="t">${elapsed()}</span>`;
+  box.prepend(d);
+  while (box.children.length > 250) box.lastChild.remove();
 }
 
 function showCurrent(c) {
@@ -647,9 +717,13 @@ function showCurrent(c) {
   meta.style.display = 'flex';
   if (c.thumb_b64) img.src = `data:image/jpeg;base64,${c.thumb_b64}`;
   $('#nowwrap').classList.add('scanning');
+  const who = `<span><b>${esc((c.profile_id || '').replace('instagram_', '@'))}</b></span>`;
+  if (c.stage === 'detecting') {
+    meta.innerHTML = who + '<span style="color:var(--accent)">detecting faces…</span>';
+    return;
+  }
   const col = c.best_score >= .6 ? 'var(--good)' : (c.best_score >= .45 ? 'var(--mid)' : 'var(--low)');
-  meta.innerHTML =
-    `<span><b>${esc((c.profile_id || '').replace('instagram_', '@'))}</b></span>`
+  meta.innerHTML = who
     + `<span>${c.n_faces} face${c.n_faces === 1 ? '' : 's'} · <b style="color:${col}">${pct(c.best_score)}%</b></span>`;
 }
 
