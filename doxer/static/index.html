@@ -279,8 +279,9 @@
       <label style="margin-top:12px">Photo to match</label>
       <div class="drop" id="drop">
         <b>Drop a photo</b> or click to choose
-        <input type="file" id="file" accept="image/*" hidden>
+        <div class="hint" style="margin-top:4px">jpg / png / webp</div>
       </div>
+      <input type="file" id="file" accept="image/*" style="display:none">
       <div class="querythumbs" id="querythumbs"></div>
       <div id="qstatus"></div>
 
@@ -546,8 +547,18 @@ function handleFile(file) {
   $('#qstatus').innerHTML = '<div class="hint" style="color:var(--good)">● photo ready</div>';
 }
 
-drop.onclick = () => fileInput.click();
-fileInput.onchange = () => handleFile(fileInput.files[0]);
+let picking = false;
+drop.onclick = (e) => {
+  if (picking) return;          // the input sits outside the drop zone, but be safe
+  e.preventDefault();
+  picking = true;
+  fileInput.click();
+  setTimeout(() => { picking = false; }, 800);
+};
+fileInput.onchange = () => {
+  handleFile(fileInput.files[0]);
+  fileInput.value = '';         // allow re-picking the same file
+};
 ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
