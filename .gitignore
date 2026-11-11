@@ -1,0 +1,22 @@
+# Playwright browser binaries (~540MB) — installed via `doxer install-browser`
+.browsers/
+
+# Scraped data: sqlite index, downloaded images, face crops
+data/
+
+# Query/test photos
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# OS
+.DS_Store

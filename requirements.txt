@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+requests>=2.31
+beautifulsoup4>=4.12
+numpy>=1.26
+opencv-python>=4.9
+onnxruntime>=1.17
+insightface>=0.7.3
+playwright>=1.44
+Pillow>=10.0
