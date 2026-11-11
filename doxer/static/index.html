@@ -269,6 +269,13 @@
         <button class="chip on" data-p="facebook">Facebook</button>
       </div>
 
+      <label style="margin-top:12px">Parallel workers <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">faster but more requests</span></label>
+      <div class="chips" id="speed">
+        <button class="chip" data-w="2">2 · cautious</button>
+        <button class="chip on" data-w="4">4 · balanced</button>
+        <button class="chip" data-w="6">6 · fast</button>
+      </div>
+
       <label style="margin-top:12px">Photo to match</label>
       <div class="drop" id="drop">
         <b>Drop a photo</b> or click to choose
@@ -519,6 +526,14 @@ async function submitCode() {
 
 // ------------------------------------------------------------ platforms
 document.querySelectorAll('#plat .chip').forEach(c => c.onclick = () => c.classList.toggle('on'));
+document.querySelectorAll('#speed .chip').forEach(c => c.onclick = () => {
+  document.querySelectorAll('#speed .chip').forEach(x => x.classList.remove('on'));
+  c.classList.add('on');
+});
+function workerCount() {
+  const el = document.querySelector('#speed .chip.on');
+  return el ? parseInt(el.dataset.w, 10) : 4;
+}
 function selectedPlatforms() {
   return [...document.querySelectorAll('#plat .chip.on')].map(c => c.dataset.p);
 }
@@ -577,6 +592,7 @@ async function startSweep() {
       employer: $('#semployer').value.trim(),
       platforms: plats,
       follow_network: true,
+      workers: workerCount(),
       query_image: up.path
     };
     const r = await api('/api/sweep', {

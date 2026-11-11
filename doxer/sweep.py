@@ -94,7 +94,7 @@ class SweepRunner:
         max_photos: int = config.SWEEP_MAX_PHOTOS,
         follow_network: bool = True,
         network_max: int = config.SWEEP_NETWORK_MAX,
-        workers: int = 2,
+        workers: int = config.SWEEP_WORKERS,
     ) -> dict:
         try:
             return self._run(query, platforms, limit, max_photos, follow_network, network_max, workers)
@@ -193,9 +193,16 @@ class SweepRunner:
             from .instagram import LoginRequired, probe_authed
 
             try:
-                self._act(f"checking {total} handles on instagram…", "probe", "run", 4)
+                self._act(
+                    f"checking {total} handles on instagram "
+                    f"({workers} workers, ~{config.IG_RATE:.1f} req/s cap)…",
+                    "probe", "run", 4,
+                )
                 hits += [dict(r, platform="instagram")
-                         for r in probe_authed(cands, workers=workers, on_result=report)
+                         for r in probe_authed(
+                             cands, workers=workers, on_result=report,
+                             rate=config.IG_RATE, burst=config.IG_BURST,
+                         )
                          if r.get("exists")]
             except LoginRequired as e:
                 self._set(message=f"instagram needs a login: {e}")

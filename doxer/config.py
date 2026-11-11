@@ -24,6 +24,12 @@ ACCEL = os.environ.get("DOXER_ACCEL", "cpu").lower()
 
 # Sweep defaults
 SWEEP_MAX_PHOTOS = 60          # photos indexed per profile when exhaustive
+# Concurrency: separate browser processes per worker (playwright's sync API is
+# not thread-safe across one instance). Measured 1521ms/handle at 1 worker,
+# ~470ms at 3, ~330ms at 5. 4 is a good speed/safety balance.
+SWEEP_WORKERS = 4
+IG_RATE = 1.2                  # sustained requests/sec across all workers
+IG_BURST = 3                   # allowed spike above that rate
 SWEEP_NETWORK_MAX = 40         # related accounts followed per hit
 SWEEP_NETWORK_DEPTH = 1        # how many hops outward to follow related accounts
 

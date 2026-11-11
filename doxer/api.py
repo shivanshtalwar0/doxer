@@ -37,6 +37,7 @@ class SweepBody(BaseModel):
     follow_network: bool = True
     network_max: int = 40
     query_image: str | None = None
+    workers: int = 4
 
 
 def create_app(pipeline) -> FastAPI:
@@ -229,6 +230,7 @@ def create_app(pipeline) -> FastAPI:
                     max_photos=body.max_photos,
                     follow_network=body.follow_network,
                     network_max=body.network_max,
+                    workers=max(1, min(8, body.workers)),
                 )
             except Exception:  # noqa: BLE001
                 pass

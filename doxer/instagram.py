@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 from . import config, db
 from .scraper import BrowserPool, ScrapeError
+from .throttle import Throttle
 
 IG = "https://www.instagram.com"
 
@@ -478,7 +479,36 @@ def profile_from_page(page) -> dict:
     }
 
 
-def _probe_authed(browser, usernames: list[str], cookies: list[dict], progress=None) -> list[dict]:
+def _page_title(page, timeout_ms: int = 4000) -> str:
+    """Best available page title, lowercased.
+
+    document.title is unreliable on profile pages: it briefly shows the real
+    name in the server HTML, then hydration overwrites it with the generic
+    "Instagram". og:title comes from the server HTML and stays correct, so
+    prefer that and only fall back to document.title.
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    best = ""
+    while time.time() < deadline:
+        try:
+            metas = page.eval_on_selector_all("meta[property='og:title']", "els => els.map(e => e.content)")
+        except Exception:  # noqa: BLE001
+            metas = []
+        cand = (metas[0] if metas else "").strip()
+        if not cand:
+            try:
+                cand = (page.title() or "").strip()
+            except Exception:  # noqa: BLE001
+                cand = ""
+        low = cand.lower()
+        if low and not low.startswith("instagram photos and videos") and low != "instagram":
+            return low
+        best = low or best
+        page.wait_for_timeout(150)
+    return best
+
+
+def _probe_authed(browser, usernames: list[str], cookies: list[dict], progress=None, throttle=None) -> list[dict]:
     ctx = browser.new_context(user_agent=_UA, viewport={"width": 1366, "height": 900})
     if cookies:
         ctx.add_cookies(cookies)
@@ -487,16 +517,33 @@ def _probe_authed(browser, usernames: list[str], cookies: list[dict], progress=N
     try:
         for u in usernames:
             rec = {"username": u, "exists": False, "name": "", "followers": 0}
+            if throttle:
+                throttle.wait()
             try:
                 resp = page.goto(f"{IG}/{quote(u)}/", wait_until="domcontentloaded", timeout=45_000)
-                page.wait_for_timeout(random.randint(500, 1100))
-                title = (page.title() or "").strip().lower()
+                # Give the SPA a moment to swap in the real title; without this
+                # we read "Instagram" and report a wrong name.
+                title = _page_title(page)
+                page.wait_for_timeout(random.randint(120, 280))
                 status = resp.status if resp is not None else None
                 body_hint = ""
                 try:
                     body_hint = (page.inner_text("main") or "")[:200].lower()
                 except Exception:  # noqa: BLE001
                     pass
+
+                # Instagram pushing back: pause everyone briefly rather than
+                # plough on and get the account checkpointed.
+                if status == 429 or "too many requests" in body_hint or "try again later" in body_hint:
+                    rec["throttled"] = True
+                    rec["error"] = "rate limited"
+                    if throttle:
+                        throttle.penalise(25)
+                    out.append(rec)
+                    if progress:
+                        progress(rec)
+                    continue
+
                 dead = (
                     status == 404
                     or "isn't available" in title
@@ -550,11 +597,16 @@ def ensure_login(progress=None) -> list[dict]:
         pool.close()
 
 
-def probe_authed(usernames: list[str], workers: int = 2, progress=None, on_result=None) -> list[dict]:
-    """Probe usernames with an authenticated browser.
+def probe_authed(usernames: list[str], workers: int = 3, progress=None, on_result=None,
+                 rate: float = 1.2, burst: int = 3) -> list[dict]:
+    """Probe usernames with authenticated browsers, safely parallelised.
 
-    on_result(done, total, rec) is called as each handle finishes, so a caller
-    can report live "checking @x (12/184)" progress.
+    Each worker owns its own browser process: playwright's sync API is not
+    thread-safe across a shared instance (concurrent navigations abort). A
+    shared token bucket caps sustained request rate across all workers, so more
+    workers raise throughput without raising sustained load on Instagram.
+
+    on_result(done, total, rec) fires as each handle resolves.
     """
     cookies = ensure_login(progress=progress)
     if not usernames:
@@ -565,19 +617,17 @@ def probe_authed(usernames: list[str], workers: int = 2, progress=None, on_resul
     lock = threading.Lock()
     done = [0]
     total = len(usernames)
+    throttle = Throttle(rate=rate, burst=burst)
 
     def run(chunk):
         pool = BrowserPool()
-
-        def emit(rec):
-            with lock:
-                done[0] += 1
-                n = done[0]
-            if on_result:
-                on_result(n, total, rec)
-
         try:
-            batch = pool.call(_probe_authed, chunk, cookies, timeout=90 * len(chunk) + 60, progress=emit)
+            batch = pool.call(
+                _probe_authed, chunk, cookies,
+                timeout=120 * len(chunk) + 90,
+                progress=_emit_wrapper(progress, on_result, lock, done, total),
+                throttle=throttle,
+            )
             with lock:
                 results.extend(batch)
         finally:
@@ -591,6 +641,18 @@ def probe_authed(usernames: list[str], workers: int = 2, progress=None, on_resul
     order = {u: i for i, u in enumerate(usernames)}
     results.sort(key=lambda r: order.get(r["username"], 0))
     return results
+
+
+def _emit_wrapper(progress, on_result, lock, done, total):
+    def emit(rec):
+        with lock:
+            done[0] += 1
+            n = done[0]
+        if progress:
+            progress(rec)
+        if on_result:
+            on_result(n, total, rec)
+    return emit
 
 
 def scrape_authed(username: str) -> dict:
