@@ -12,6 +12,35 @@ from insightface.app import FaceAnalysis  # noqa: E402
 from . import config
 
 
+def _available_providers() -> list[str]:
+    try:
+        import onnxruntime as ort
+
+        return list(ort.get_available_providers())
+    except Exception:  # noqa: BLE001
+        return ["CPUExecutionProvider"]
+
+
+def _pick_providers() -> list[str]:
+    """Prefer CoreML, then CUDA, then CPU."""
+    avail = _available_providers()
+    chosen: list[str] = []
+    for p in ("CoreMLExecutionProvider", "CUDAExecutionProvider"):
+        if p in avail:
+            chosen.append(p)
+            break
+    chosen.append("CPUExecutionProvider")
+    return chosen
+
+
+def _accelerator_name(providers: list[str]) -> str:
+    if "CoreMLExecutionProvider" in providers:
+        return "coreml"
+    if "CUDAExecutionProvider" in providers:
+        return "cuda"
+    return "cpu"
+
+
 @dataclass
 class DetectedFace:
     bbox: list          # [x1, y1, x2, y2] in original image px
@@ -21,11 +50,20 @@ class DetectedFace:
 
 
 class FaceEngine:
-    """InsightFace buffalo_l detection + ArcFace recognition on CPU."""
+    """InsightFace buffalo_l detection + ArcFace recognition.
 
-    def __init__(self, det_size=config.DET_SIZE):
-        self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    Uses CoreML (Apple Silicon GPU/ANE) when available, falling back to CPU.
+    Detection stays on CPU: CoreML is often slower for the variable-size det
+    pass, while recognition (fixed 112x112) benefits a lot.
+    """
+
+    def __init__(self, det_size=config.DET_SIZE, providers: list[str] | None = None):
+        self.providers = providers or _pick_providers()
+        self.app = FaceAnalysis(name="buffalo_l", providers=self.providers)
         self.app.prepare(ctx_id=-1, det_size=det_size)
+
+    def describe(self) -> dict:
+        return {"providers": self.providers, "accelerator": _accelerator_name(self.providers)}
 
     @staticmethod
     def _crop_thumb(bgr: np.ndarray, bbox: list, size: int = config.THUMB_SIZE) -> np.ndarray:

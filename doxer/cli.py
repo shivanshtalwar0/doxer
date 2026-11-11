@@ -24,6 +24,20 @@ def main() -> int:
     p_search.add_argument("--top", type=int, default=10)
     p_search.add_argument("--json", action="store_true")
 
+    p_sweep = sub.add_parser("sweep", help="probe many name-variant usernames, index every hit, then rank them against a query photo")
+    p_sweep.add_argument("name", help="person's name, e.g. 'abhay rathi'")
+    p_sweep.add_argument("--last", action="append", default=[], help="extra surname variants, e.g. --last raj")
+    p_sweep.add_argument("--first", action="append", default=[], help="extra first-name variants, e.g. --first anant")
+    p_sweep.add_argument("--city", default=None, help="city to append as a handle suffix, e.g. muzaffarnagar")
+    p_sweep.add_argument("--platform", action="append", choices=["instagram", "threads", "facebook"],
+                         dest="platforms", help="platforms to probe (default: instagram + threads)")
+    p_sweep.add_argument("--full-images", type=int, default=2, help="post pages to visit per hit (default 2)")
+    p_sweep.add_argument("--workers", type=int, default=3, help="parallel browsers for probing (default 3)")
+    p_sweep.add_argument("--limit", type=int, default=None, help="cap the number of candidates probed")
+    p_sweep.add_argument("--query", default=None, help="query photo to rank against (default data/query.jpg)")
+    p_sweep.add_argument("--dry-run", action="store_true", help="only print the generated candidates")
+    p_sweep.add_argument("--json", action="store_true")
+
     sub.add_parser("list", help="list indexed profiles")
     sub.add_parser("stats", help="show index statistics")
 
@@ -42,7 +56,6 @@ def main() -> int:
     if args.cmd == "install-browser":
         import os
         import subprocess
-        import sys
 
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=os.path.join(root, ".browsers"))
@@ -92,6 +105,59 @@ def main() -> int:
                 band = "STRONG" if m["score"] >= 0.6 else ("possible" if m["score"] >= 0.45 else "weak")
                 name = m.get("display_name") or m["username"]
                 print(f"  {i:>2}. {m['platform']:<10} @{m['username']:<28} {m['score']:.3f}  {band}")
+        return 0
+
+    if args.cmd == "sweep":
+        from .candidates import from_query
+
+        cands = from_query(
+            args.name,
+            city=args.city,
+            extra_firsts=args.first,
+            extra_lasts=args.last,
+            limit=args.limit,
+        )
+        if args.dry_run:
+            for c in cands:
+                print(c)
+            print(f"-- {len(cands)} candidates", file=sys.stderr)
+            return 0
+
+        platforms = tuple(args.platforms) if args.platforms else ("instagram", "threads")
+        print(f"probing {len(cands)} candidates on {', '.join(platforms)}…", file=sys.stderr)
+
+        def progress(done: int, total: int, batch: list) -> None:
+            for r in batch:
+                if r.get("exists"):
+                    extra = f" -> indexed {r['indexed']}" if r.get("indexed") else ""
+                    print(f"  FOUND {r['platform']:<10} @{r['username']}{extra}", file=sys.stderr)
+            if total:
+                print(f"  …{done}/{total} probed", file=sys.stderr)
+
+        result = pipe.sweep(
+            cands,
+            platforms=platforms,
+            full_images=args.full_images,
+            workers=args.workers,
+            on_progress=progress,
+        )
+        best = pipe.rank_all(args.query) if any(m for m in result["best"]) else result["best"]
+
+        if args.json:
+            print(json.dumps({"result": result, "ranking": best}, indent=2, default=str))
+            return 0
+
+        print(f"\nprobed {result['probed']}  found {len(result['found'])}  indexed {len(result['indexed'])}")
+        for e in result["errors"]:
+            print(f"  index error {e['url']}: {e['error']}", file=sys.stderr)
+        if not best:
+            print("nothing indexed with a detectable face")
+            return 0
+        print("\nbest score per profile (no floor):")
+        for m in best:
+            print(f"  {m['band'].upper():<9} {m['score']:.3f}  @{m['username']:<26} {m['platform']:<10} {m['face_thumb']}")
+        if not result["strong"]:
+            print("\nnothing reached STRONG (>=0.60) — treat all of the above as non-matches.")
         return 0
 
     if args.cmd == "list":

@@ -204,6 +204,79 @@ def _scrape_instagram(browser, username: str, full_images: int):
     }
 
 
+def _probe_one(page, url: str) -> dict:
+    """Load a profile URL and report whether it exists (login walls count as existing)."""
+    out: dict = {"exists": False, "status": None, "name": "", "error": None}
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=40_000)
+        page.wait_for_timeout(600)
+        title = (page.title() or "").strip()
+        tl = title.lower()
+        out["status"] = resp.status if resp is not None else None
+        if resp is not None and resp.status == 404:
+            return out
+        if "isn't available" in tl or "page not found" in tl or "page isn't available" in tl:
+            return out
+        if not title:
+            return out
+        out["exists"] = True
+        out["name"] = title.split("|")[0].strip()[:80]
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:120]
+    return out
+
+
+def _probe_batch(browser, targets: list[tuple[str, str]]) -> list[dict]:
+    """Probe [(platform, username), ...] in one page. Sequential, order preserved."""
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 1366, "height": 900})
+        out = []
+        for platform, username in targets:
+            url = f"https://www.instagram.com/{username}/" if platform == "instagram" else f"https://www.threads.net/@{username}/"
+            r = _probe_one(page, url)
+            out.append({"platform": platform, "username": username, "url": url, **r})
+        return out
+    finally:
+        page.close()
+
+
+def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=None) -> list[dict]:
+    """Check whether usernames exist on their platforms.
+
+    Returns [{platform, username, url, exists, status, name, error}]. Splits the
+    work across `workers` independent browser instances for speed.
+    """
+    if not targets:
+        return []
+    workers = max(1, min(workers, len(targets)))
+    chunks = [targets[i::workers] for i in range(workers)]
+    results: list[dict] = []
+    lock = threading.Lock()
+    done = [0]
+
+    def worker(chunk: list[tuple[str, str]]) -> None:
+        pool = BrowserPool()
+        try:
+            batch = pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60)
+            with lock:
+                results.extend(batch)
+                done[0] += len(batch)
+                if progress:
+                    progress(done[0], len(targets), batch)
+        finally:
+            pool.close()
+
+    threads = [threading.Thread(target=worker, args=(c,), daemon=True) for c in chunks if c]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    order = {u: i for i, (_, u) in enumerate(targets)}
+    results.sort(key=lambda r: order.get(r["username"], 0))
+    return results
+
+
 def _scrape_threads(browser, username: str):
     url = f"https://www.threads.com/@{username}"
     page = browser.new_page()
