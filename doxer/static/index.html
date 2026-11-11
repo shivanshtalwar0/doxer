@@ -619,8 +619,32 @@ async function startSweep() {
 }
 
 async function stopSweep() {
-  if (!SID) return;
-  try { await api(`/api/sessions/${SID}/cancel`, { method: 'POST' }); } catch (e) { /* ignore */ }
+  if (!SID) { $('#curtext').textContent = 'nothing to stop'; return; }
+  $('#stopbtn').disabled = true;
+  $('#curtext').textContent = 'stopping…';
+  try {
+    await api(`/api/sessions/${SID}/cancel`, { method: 'POST' });
+  } catch (e) {
+    $('#stopbtn').disabled = false;
+    addActRow({label: 'stop failed: ' + e.message, state: 'error', step: 'stop'});
+    return;
+  }
+  addActRow({label: 'stop requested', state: 'warn', step: 'stop'});
+  // poll fast for a moment so the UI reflects it right away
+  const fast = setInterval(async () => {
+    let d = null;
+    try { d = await api(`/api/sessions/${SID}/checks?after=${LAST_ID}&act_after=${ACT_ID}`); } catch (e) {}
+    if (!d) return;
+    if (d.activity) for (const a of d.activity) { ACT_ID = Math.max(ACT_ID, a.id); renderAct(a); addActRow(a); }
+    if (d.status !== 'running') {
+      clearInterval(fast);
+      finishRun();
+      loadResults();
+      $('#curtext').textContent = 'stopped';
+      $('#currentact').className = 'currentact idle';
+    }
+  }, 500);
+  setTimeout(() => clearInterval(fast), 20000);
 }
 
 function finishRun() {

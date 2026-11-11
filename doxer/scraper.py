@@ -226,13 +226,15 @@ def _probe_one(page, url: str) -> dict:
     return out
 
 
-def _probe_batch(browser, targets: list[tuple[str, str]], on_each=None) -> list[dict]:
+def _probe_batch(browser, targets: list[tuple[str, str]], on_each=None, stop=None) -> list[dict]:
     """Probe [(platform, username), ...] in one page. Sequential, order preserved."""
     page = browser.new_page()
     try:
         page.set_viewport_size({"width": 1366, "height": 900})
         out = []
         for platform, username in targets:
+            if stop and stop():
+                break
             url = f"https://www.instagram.com/{username}/" if platform == "instagram" else f"https://www.threads.net/@{username}/"
             r = _probe_one(page, url)
             rec = {"platform": platform, "username": username, "url": url, **r}
@@ -258,6 +260,8 @@ def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=N
     lock = threading.Lock()
     done = [0]
 
+    errors: list[BaseException] = []
+
     def worker(chunk: list[tuple[str, str]]) -> None:
         pool = BrowserPool()
 
@@ -271,7 +275,11 @@ def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=N
                 progress(n, len(targets), [rec])
 
         try:
-            pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60, on_each=on_each)
+            pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60, on_each=on_each,
+                      stop=lambda: bool(errors))
+        except BaseException as e:  # noqa: BLE001
+            with lock:
+                errors.append(e)
         finally:
             pool.close()
 
@@ -280,6 +288,8 @@ def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=N
         t.start()
     for t in threads:
         t.join()
+    if errors:
+        raise errors[0]
     order = {u: i for i, (_, u) in enumerate(targets)}
     results.sort(key=lambda r: order.get(r["username"], 0))
     return results

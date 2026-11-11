@@ -508,7 +508,7 @@ def _page_title(page, timeout_ms: int = 4000) -> str:
     return best
 
 
-def _probe_authed(browser, usernames: list[str], cookies: list[dict], progress=None, throttle=None) -> list[dict]:
+def _probe_authed(browser, usernames: list[str], cookies: list[dict], progress=None, throttle=None, stop=None) -> list[dict]:
     ctx = browser.new_context(user_agent=_UA, viewport={"width": 1366, "height": 900})
     if cookies:
         ctx.add_cookies(cookies)
@@ -516,6 +516,8 @@ def _probe_authed(browser, usernames: list[str], cookies: list[dict], progress=N
     out = []
     try:
         for u in usernames:
+            if stop and stop():
+                break
             rec = {"username": u, "exists": False, "name": "", "followers": 0}
             if throttle:
                 throttle.wait()
@@ -619,6 +621,8 @@ def probe_authed(usernames: list[str], workers: int = 3, progress=None, on_resul
     total = len(usernames)
     throttle = Throttle(rate=rate, burst=burst)
 
+    errors: list[BaseException] = []
+
     def run(chunk):
         pool = BrowserPool()
         try:
@@ -627,9 +631,16 @@ def probe_authed(usernames: list[str], workers: int = 3, progress=None, on_resul
                 timeout=120 * len(chunk) + 90,
                 progress=_emit_wrapper(progress, on_result, lock, done, total),
                 throttle=throttle,
+                stop=lambda: bool(errors),
             )
             with lock:
                 results.extend(batch)
+        except BaseException as e:  # noqa: BLE001
+            # remember it: a callback raising (e.g. cancellation) must not be
+            # swallowed by the worker thread, or the caller hangs until every
+            # chunk finishes on its own.
+            with lock:
+                errors.append(e)
         finally:
             pool.close()
 
@@ -638,6 +649,8 @@ def probe_authed(usernames: list[str], workers: int = 3, progress=None, on_resul
         t.start()
     for t in threads:
         t.join()
+    if errors:
+        raise errors[0]
     order = {u: i for i, u in enumerate(usernames)}
     results.sort(key=lambda r: order.get(r["username"], 0))
     return results

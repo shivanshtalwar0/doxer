@@ -50,6 +50,10 @@ def _thumb_b64(bgr) -> str:
     return base64.b64encode(enc.tobytes()).decode() if ok else ""
 
 
+class _Cancelled(Exception):
+    """Raised inside worker callbacks to unwind a cancelled run."""
+
+
 class SweepRunner:
     """Runs one sweep session. Not reusable; one instance per run."""
 
@@ -98,6 +102,8 @@ class SweepRunner:
     ) -> dict:
         try:
             return self._run(query, platforms, limit, max_photos, follow_network, network_max, workers)
+        except _Cancelled:
+            return self._finish_cancelled()
         except Exception as e:  # noqa: BLE001
             db.update_session(self.sid, status="error", message=f"{type(e).__name__}: {e}")
             raise
@@ -198,12 +204,21 @@ class SweepRunner:
                     f"({workers} workers, ~{config.IG_RATE:.1f} req/s cap)…",
                     "probe", "run", 4,
                 )
-                hits += [dict(r, platform="instagram")
-                         for r in probe_authed(
-                             cands, workers=workers, on_result=report,
-                             rate=config.IG_RATE, burst=config.IG_BURST,
-                         )
-                         if r.get("exists")]
+                def _report(n, tot, rec):
+                    if self.cancelled:
+                        raise _Cancelled()
+                    report(n, tot, rec)
+
+                try:
+                    hits += [dict(r, platform="instagram")
+                             for r in probe_authed(
+                                 cands, workers=workers, on_result=_report,
+                                 rate=config.IG_RATE, burst=config.IG_BURST,
+                             )
+                             if r.get("exists")]
+                except _Cancelled:
+                    self._act("stopped by you", "cancelled", "warn", 0)
+                    raise
             except LoginRequired as e:
                 self._set(message=f"instagram needs a login: {e}")
                 self._act(f"instagram skipped — needs a login: {e}", "probe", "error", 4)
@@ -217,6 +232,8 @@ class SweepRunner:
                 targets = [(plat, c) for c in cands]
 
                 def report_other(n, tot, batch, _plat=plat):
+                    if self.cancelled:
+                        raise _Cancelled()
                     pct2 = 30 + int(8 * n / max(1, tot))
                     r = batch[0] if batch else {}
                     u = r.get("username", "?")
@@ -354,5 +371,6 @@ class SweepRunner:
         return best
 
     def _finish_cancelled(self) -> dict:
-        db.update_session(self.sid, status="cancelled", stage="done", message="cancelled")
+        db.update_session(self.sid, status="cancelled", stage="done", message="stopped")
+        self._act("stopped", "cancelled", "warn", 0)
         return {"status": "cancelled"}
