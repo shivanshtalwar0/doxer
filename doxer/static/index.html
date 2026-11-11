@@ -599,6 +599,7 @@ async function startSweep() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     SID = r.session;
+    try { localStorage.setItem('doxer_sid', SID); } catch (e) {}
     POLL = setInterval(pollChecks, 1200);
   } catch (e) {
     addActRow({label: 'error: ' + e.message, state: 'error', step: 'error'});
@@ -613,6 +614,7 @@ async function stopSweep() {
 
 function finishRun() {
   RUNNING = false;
+  try { localStorage.removeItem('doxer_sid'); } catch (e) {}
   $('#sweepbtn').disabled = false; $('#stopbtn').disabled = true;
   $('#recdot').style.display = 'none';
   clearInterval(POLL); POLL = null;
@@ -797,8 +799,41 @@ async function delProfile(pid) {
   refresh();
 }
 
+// Reattach to a sweep that is still running after a page reload.
+async function reattach() {
+  let sid = null;
+  try { sid = localStorage.getItem('doxer_sid'); } catch (e) {}
+  let sessions = [];
+  try { sessions = await api('/api/sessions'); } catch (e) { return; }
+  const running = sessions.find(x => x.status === 'running');
+  const target = running || (sid ? sessions.find(x => x.id === sid) : null);
+  if (!target) {
+    try { localStorage.removeItem('doxer_sid'); } catch (e) {}
+    return;
+  }
+  SID = target.id;
+  LAST_ID = 0; ACT_ID = 0; T0 = Date.now() - 1000 * 60;
+  $('#actfeed').innerHTML = '';
+  $('#strip').innerHTML = '';
+  $('#sweepbtn').disabled = true;
+  $('#stopbtn').disabled = target.status !== 'running';
+  RUNNING = true;
+  $('#recdot').style.display = target.status === 'running' ? 'inline-block' : 'none';
+  $('#nowidle').textContent = 'reattached to a sweep that was already running…';
+  $('#curtext').textContent = 'reattached — catching up';
+  setStage(target.stage);
+  if (target.status === 'running') {
+    POLL = setInterval(pollChecks, 1200);
+    addActRow({label: 'reattached to running sweep: "' + target.query + '"', state: 'ok', step: 'start'});
+  } else {
+    await loadResults();
+    addActRow({label: 'previous sweep: ' + target.status + ' — showing results', state: 'ok', step: 'done'});
+  }
+}
+
 loadAccounts();
 refresh();
+reattach();
 </script>
 </body>
 </html>
