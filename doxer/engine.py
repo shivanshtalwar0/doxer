@@ -5,11 +5,15 @@ from dataclasses import dataclass
 os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
 logging.getLogger("insightface").setLevel(logging.ERROR)
 
+import threading  # noqa: E402
+
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from insightface.app import FaceAnalysis  # noqa: E402
 
 from . import config
+
+_INFER_LOCK = threading.Lock()
 
 
 def _available_providers() -> list[str]:
@@ -93,8 +97,12 @@ class FaceEngine:
         return cv2.resize(bgr, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
 
     def detect(self, bgr: np.ndarray) -> list[DetectedFace]:
+        # onnxruntime sessions are not safe to call concurrently; the sweep runs
+        # several workers, so serialise inference (it is fast relative to I/O).
         faces: list[DetectedFace] = []
-        for f in self.app.get(bgr):
+        with _INFER_LOCK:
+            raw = self.app.get(bgr)
+        for f in raw:
             emb = np.asarray(f.normed_embedding, dtype=np.float32)
             n = float(np.linalg.norm(emb))
             if n < 1e-9:

@@ -11,12 +11,15 @@ Attributes (city, education, school, employer, ...) are used two ways:
 """
 
 import base64
+import threading
 
 import cv2
 import numpy as np
 
 from . import config, db
 from .candidates import from_query
+from concurrent.futures import ThreadPoolExecutor
+
 from .pipeline import Pipeline
 
 ATTR_KEYS = ("city", "education", "school", "college", "employer", "workplace", "hometown")
@@ -63,6 +66,8 @@ class SweepRunner:
         self.attrs = attrs or {}
         self.pipe = pipe or Pipeline()
         self.cancelled = False
+        self._lock = threading.Lock()      # guards _seen, counters, best map
+        self._db_lock = threading.Lock()   # sqlite writes from worker threads
         self._seen: set[str] = set()
         self._qfaces = []
         bgr = cv2.imread(str(query_image)) if query_image else None
@@ -99,16 +104,19 @@ class SweepRunner:
         follow_network: bool = True,
         network_max: int = config.SWEEP_NETWORK_MAX,
         workers: int = config.SWEEP_WORKERS,
+        index_workers: int = config.INDEX_WORKERS,
     ) -> dict:
         try:
-            return self._run(query, platforms, limit, max_photos, follow_network, network_max, workers)
+            return self._run(query, platforms, limit, max_photos, follow_network,
+                             network_max, workers, index_workers)
         except _Cancelled:
             return self._finish_cancelled()
         except Exception as e:  # noqa: BLE001
             db.update_session(self.sid, status="error", message=f"{type(e).__name__}: {e}")
             raise
 
-    def _run(self, query, platforms, limit, max_photos, follow_network, network_max, workers) -> dict:
+    def _run(self, query, platforms, limit, max_photos, follow_network, network_max,
+             workers, index_workers) -> dict:
         cands = from_query(query, city=self.attrs.get("city") or None, limit=limit)
         db.update_session(self.sid, n_candidates=len(cands))
         self._set("probing", f"probing {len(cands)} candidate handles")
@@ -122,45 +130,64 @@ class SweepRunner:
         self._act(f"{len(hits)} of {len(cands)} handles exist", "probe_done", "ok", 40)
         self._set("indexing", f"{len(hits)} handles exist — indexing")
 
-        # ---- 2. index every hit
+        # ---- 2. index every hit, in parallel
+        # I/O (page loads, image downloads) dominates here, so a thread pool
+        # gives a large speedup; face inference itself is serialised in the
+        # engine. Progress is written per image, so the UI updates continuously.
         n_prof = n_img = n_faces = 0
         indexed: list[dict] = []
-        total = max(1, len(hits))
-        for i, r in enumerate(hits, 1):
+        lock = self._lock
+        icount = [0]
+
+        def index_one(job: tuple[int, dict]) -> dict | None:
+            i, r = job
             if self.cancelled:
-                return self._finish_cancelled()
-            pct = 40 + int(45 * i / total)
-            self._act(f"scraping profile {i}/{total}: @{r['username']}", "profile", "run", pct)
+                return None
+            platform = r.get("platform", "instagram")
+            uname = r["username"]
+            pct = 40 + int(45 * i / max(1, total))
+            with lock:
+                icount[0] += 1
+                started = icount[0]
             try:
-                prof = self._index(r["username"], max_photos,
-                                   platform=r.get("platform", "instagram"))
+                prof = self._index(uname, max_photos, platform=platform)
             except Exception as e:  # noqa: BLE001
-                _plat = r.get("platform", "instagram")
-                db.add_session_profile(self.sid, f"{_plat}_{r['username']}", platform=_plat,
-                                       username=r["username"],
-                                       status="error", raw={"error": str(e)[:200]})
-                self._act(f"@{r['username']} failed: {type(e).__name__}", "profile", "warn", pct)
-                continue
+                with self._db_lock:
+                    db.add_session_profile(self.sid, f"{platform}_{uname}", platform=platform,
+                                           username=uname, status="error",
+                                           raw={"error": str(e)[:200]})
+                self._act(f"{platform} @{uname} failed: {type(e).__name__}", "profile", "warn", pct)
+                return None
             if prof is None:
-                self._act(f"@{r['username']} already seen — skipped", "profile", "ok", pct)
-                continue
-            if self.cancelled:
-                # stopped part-way through this profile: keep what we indexed
-                # and exit immediately rather than starting another one
-                self._act(f"@{r['username']}: stopped after {prof['n_images']} photos",
-                          "profile", "warn", pct)
-                self._set(n_profiles=n_prof, n_images=n_img, n_faces=n_faces)
-                return self._finish_cancelled()
-            indexed.append(prof)
-            n_prof += 1
-            n_img += prof["n_images"]
-            n_faces += prof["n_faces"]
+                self._act(f"{platform} @{uname} already seen — skipped", "profile", "ok", pct)
+                return None
+            with lock:
+                indexed.append(prof)
             best = self._best_by_profile.get(prof["pid"], 0.0)
             self._act(
-                f"@{r['username']}: {prof['n_images']} photos, {prof['n_faces']} faces, best {best:.3f}",
+                f"{platform} @{uname}: {prof['n_images']} photos, {prof['n_faces']} faces, "
+                f"best {best:.3f}  [{started}/{total}]",
                 "profile", "ok", pct,
             )
-            self._set(n_profiles=n_prof, n_images=n_img, n_faces=n_faces)
+            with lock:
+                self._set(n_profiles=len(indexed),
+                          n_images=sum(x["n_images"] for x in indexed),
+                          n_faces=sum(x["n_faces"] for x in indexed))
+            return prof
+
+        total = max(1, len(hits))
+        workers = max(1, min(index_workers, len(hits) or 1))
+        if workers > 1:
+            self._act(f"indexing {len(hits)} profiles with {workers} workers", "index_start", "run", 40)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(index_one, enumerate(hits, 1)))
+
+        if self.cancelled:
+            return self._finish_cancelled()
+        n_prof = len(indexed)
+        n_img = sum(x["n_images"] for x in indexed)
+        n_faces = sum(x["n_faces"] for x in indexed)
+        self._set(n_profiles=n_prof, n_images=n_img, n_faces=n_faces)
 
         # ---- 3. follow the network
         if follow_network and not self.cancelled:
@@ -276,9 +303,10 @@ class SweepRunner:
         """Scrape + index one profile, recording a progress row per image."""
         uname = username.lower()
         key = f"{platform}:{uname}"
-        if key in self._seen:
-            return None
-        self._seen.add(key)
+        with self._lock:
+            if key in self._seen:
+                return None
+            self._seen.add(key)
 
         self._act(f"{platform} @{uname}: loading profile page", "scrape", "run")
         info = self._scrape(platform, uname)
@@ -302,53 +330,63 @@ class SweepRunner:
         n_img = n_faces = 0
         profile_best = 0.0
         n_total = max(1, len(urls))
-        for k, url in enumerate(urls, 1):
-            if self.cancelled:
-                break
-            self._act(f"@{uname}: photo {k}/{n_total} — downloading", "image", "run")
-            bgr, w, h = self.pipe.download(url)
-            if bgr is None:
-                self._act(f"{platform} @{uname}: photo {k}/{n_total} — skipped (not an image)", "image", "warn")
-                continue
+        # Download ahead of detection: network latency dominates for photos, so
+        # a small prefetch window keeps the engine busy instead of waiting.
+        with ThreadPoolExecutor(max_workers=config.INDEX_PREFETCH) as prefetch:
+            futures = [(k, u, prefetch.submit(self.pipe.download, u))
+                       for k, u in enumerate(urls, 1)]
+            for k, url, fut in futures:
+                if self.cancelled:
+                    break
+                self._act(f"{platform} @{uname}: photo {k}/{n_total} — downloading", "image", "run")
+                try:
+                    bgr, w, h = fut.result(timeout=90)
+                except Exception:  # noqa: BLE001
+                    bgr = None
+                if bgr is None:
+                    self._act(f"{platform} @{uname}: photo {k}/{n_total} — skipped (not an image)",
+                              "image", "warn")
+                    continue
 
-            # Push the image to the UI the moment it lands, before detection,
-            # so the view shows what is being worked on rather than the result.
-            thumb = _thumb_b64(self.pipe.engine.shrink(bgr))
-            check_id = db.add_session_check(
-                self.sid, profile_id=pid, image_path=url, thumb_b64=thumb,
-                n_faces=0, best_score=0.0, matched=False, stage="detecting",
-            )
-            self._act(f"{platform} @{uname}: photo {k}/{n_total} — detecting faces", "image", "run")
+                # Push the image to the UI the moment it lands, before detection,
+                # so the view shows what is being worked on rather than the result.
+                thumb = _thumb_b64(self.pipe.engine.shrink(bgr))
+                check_id = db.add_session_check(
+                    self.sid, profile_id=pid, image_path=url, thumb_b64=thumb,
+                    n_faces=0, best_score=0.0, matched=False, stage="detecting",
+                )
+                self._act(f"{platform} @{uname}: photo {k}/{n_total} — detecting faces",
+                          "image", "run")
 
-            faces = self.pipe.engine.detect(bgr)
-            n_img += 1
-            n_faces += len(faces)
+                faces = self.pipe.engine.detect(bgr)
+                n_img += 1
+                n_faces += len(faces)
 
-            img_score = 0.0
-            if faces and self._qfaces:
-                for f in faces:
-                    for q in self._qfaces:
-                        s = float(np.dot(f.embedding, q.embedding))
-                        img_score = max(img_score, s)
+                img_score = 0.0
+                if faces and self._qfaces:
+                    for f in faces:
+                        for q in self._qfaces:
+                            img_score = max(img_score, float(np.dot(f.embedding, q.embedding)))
 
-            self.pipe.store_image(pid, url, bgr, faces, uname, info.get("name", ""),
-                                  f"https://www.instagram.com/{uname}/")
-            face = faces[0] if faces else None
-            db.update_session_check(
-                check_id,
-                thumb_b64=_thumb_b64(face.thumb_bgr if face else bgr),
-                n_faces=len(faces),
-                best_score=img_score,
-                matched=1 if img_score >= config.SCORE_POSSIBLE else 0,
-                stage="done",
-            )
-            profile_best = max(profile_best, img_score)
-            self._best_by_profile[pid] = max(self._best_by_profile.get(pid, 0.0), img_score)
-            state = "ok" if img_score >= config.SCORE_POSSIBLE else "run"
-            self._act(
-                f"{platform} @{uname}: photo {k}/{n_total} — {len(faces)} face(s), best {img_score:.3f}",
-                "image", state,
-            )
+                self.pipe.store_image(pid, url, bgr, faces, uname, info.get("name", ""),
+                                      f"https://www.instagram.com/{uname}/")
+                face = faces[0] if faces else None
+                db.update_session_check(
+                    check_id,
+                    thumb_b64=_thumb_b64(face.thumb_bgr if face else bgr),
+                    n_faces=len(faces),
+                    best_score=img_score,
+                    matched=1 if img_score >= config.SCORE_POSSIBLE else 0,
+                    stage="done",
+                )
+                profile_best = max(profile_best, img_score)
+                with self._lock:
+                    self._best_by_profile[pid] = max(self._best_by_profile.get(pid, 0.0), img_score)
+                state = "ok" if img_score >= config.SCORE_POSSIBLE else "run"
+                self._act(
+                    f"{platform} @{uname}: photo {k}/{n_total} — {len(faces)} face(s), best {img_score:.3f}",
+                    "image", state,
+                )
 
         a_score, a_hits = attribute_score(self.attrs, full_name=info.get("name", ""),
                                           bio=info.get("bio", ""), username=uname)

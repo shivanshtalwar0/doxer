@@ -19,6 +19,7 @@ class Pipeline:
         db.init()
         self.engine = FaceEngine()
         self._search_lock = threading.Lock()
+        self._store_lock = threading.Lock()
 
     # ----------------------------------------------------------------- index
 
@@ -108,12 +109,15 @@ class Pipeline:
         if prof is None:
             db.upsert_profile(pid, "instagram", username or pid, source_url or url, display_name)
 
-        idx = len(db.list_images(pid))
-        path = config.IMAGES_DIR / pid / f"{idx:03d}.jpg"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 88])
-        h, w = bgr.shape[:2]
-        image_id = db.add_image(pid, url, str(path.relative_to(config.DATA)), w, h)
+        # index images per profile under a lock: concurrent workers on the same
+        # profile would otherwise compute the same idx and overwrite each other
+        with self._store_lock:
+            idx = len(db.list_images(pid))
+            path = config.IMAGES_DIR / pid / f"{idx:03d}.jpg"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 88])
+            image_id = db.add_image(pid, url, str(path.relative_to(config.DATA)),
+                                    bgr.shape[1], bgr.shape[0])
 
         cur = db.get_profile(pid)
         if set_avatar_if_missing and cur and not cur.get("avatar_path"):

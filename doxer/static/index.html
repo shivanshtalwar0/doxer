@@ -269,11 +269,23 @@
         <button class="chip on" data-p="facebook">Facebook</button>
       </div>
 
-      <label style="margin-top:12px">Parallel workers <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">faster but more requests</span></label>
-      <div class="chips" id="speed">
-        <button class="chip" data-w="2">2 · cautious</button>
-        <button class="chip on" data-w="4">4 · balanced</button>
-        <button class="chip" data-w="6">6 · fast</button>
+      <div class="grid2" style="margin-top:12px">
+        <div>
+          <label>Probe workers <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">requests</span></label>
+          <div class="chips" id="speed">
+            <button class="chip" data-w="2">2</button>
+            <button class="chip on" data-w="4">4</button>
+            <button class="chip" data-w="6">6</button>
+          </div>
+        </div>
+        <div>
+          <label>Index workers <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">scraping</span></label>
+          <div class="chips" id="idxw">
+            <button class="chip" data-w="2">2</button>
+            <button class="chip on" data-w="4">4</button>
+            <button class="chip" data-w="8">8</button>
+          </div>
+        </div>
       </div>
 
       <label style="margin-top:12px">Photo to match</label>
@@ -527,14 +539,18 @@ async function submitCode() {
 
 // ------------------------------------------------------------ platforms
 document.querySelectorAll('#plat .chip').forEach(c => c.onclick = () => c.classList.toggle('on'));
-document.querySelectorAll('#speed .chip').forEach(c => c.onclick = () => {
-  document.querySelectorAll('#speed .chip').forEach(x => x.classList.remove('on'));
-  c.classList.add('on');
+['#speed', '#idxw'].forEach(sel => {
+  document.querySelectorAll(sel + ' .chip').forEach(c => c.onclick = () => {
+    document.querySelectorAll(sel + ' .chip').forEach(x => x.classList.remove('on'));
+    c.classList.add('on');
+  });
 });
-function workerCount() {
-  const el = document.querySelector('#speed .chip.on');
-  return el ? parseInt(el.dataset.w, 10) : 4;
+function chipValue(sel, dflt) {
+  const el = document.querySelector(sel + ' .chip.on');
+  return el ? parseInt(el.dataset.w, 10) : dflt;
 }
+function indexWorkerCount() { return chipValue('#idxw', 4); }
+function workerCount() { return chipValue('#speed', 4); }
 function selectedPlatforms() {
   return [...document.querySelectorAll('#plat .chip.on')].map(c => c.dataset.p);
 }
@@ -604,6 +620,7 @@ async function startSweep() {
       platforms: plats,
       follow_network: true,
       workers: workerCount(),
+      index_workers: indexWorkerCount(),
       query_image: up.path
     };
     const r = await api('/api/sweep', {

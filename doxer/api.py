@@ -38,6 +38,7 @@ class SweepBody(BaseModel):
     network_max: int = 40
     query_image: str | None = None
     workers: int = 4
+    index_workers: int = 4
 
 
 def create_app(pipeline) -> FastAPI:
@@ -231,6 +232,7 @@ def create_app(pipeline) -> FastAPI:
                     follow_network=body.follow_network,
                     network_max=body.network_max,
                     workers=max(1, min(8, body.workers)),
+                    index_workers=max(1, min(8, body.index_workers)),
                 )
             except Exception:  # noqa: BLE001
                 pass
