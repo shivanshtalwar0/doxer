@@ -411,6 +411,29 @@ def parse_count(s: str) -> int:
     return int(v * _COUNT_SUFFIX.get(m.group(2) or "", 1))
 
 
+# Instagram encodes what an image is in its CDN path:
+#   /v/t51.2885-19/  profile photo (avatar)
+#   /v/t51.71878-15/ or t51.82787-15/  post / reel media
+#   /v/t51.89012-19/, t58.9792-6/ ...  UI chrome (icons, badges, emoji)
+# Only media is worth downloading; chrome produces empty "0 faces" entries.
+_MEDIA_HINTS = ("t51.71878-15", "t51.82787-15", "t39.30808-6", "t51.2885-15")
+_AVATAR_HINTS = ("t51.2885-19",)
+
+
+def _is_media_url(url: str) -> bool:
+    """True only for post/reel media.
+
+    Unknown variants are rejected too: the observed chrome variants
+    (t51.89012-19, t58.9792-6) were slipping through a permissive fallback and
+    burning downloads on icons.
+    """
+    return any(h in url.lower() for h in _MEDIA_HINTS)
+
+
+def _is_avatar_url(url: str) -> bool:
+    return any(h in url.lower() for h in _AVATAR_HINTS)
+
+
 def profile_from_page(page) -> dict:
     """Pull name, bio, follower count and image URLs off a profile page."""
     name = bio = ""
@@ -459,7 +482,7 @@ def profile_from_page(page) -> dict:
         srcs = page.eval_on_selector_all(
             "img[src*='cdninstagram'], img[src*='fbcdn.net']", "els => els.map(e => e.currentSrc || e.src)"
         )
-        imgs = [s for s in srcs if s]
+        imgs = [s for s in srcs if s and _is_media_url(s)]
     except Exception:  # noqa: BLE001
         pass
 
@@ -728,6 +751,37 @@ def _related(browser, username: str, cookies: list[dict], limit: int) -> list[st
             pass
 
 
+def _post_images(browser, hrefs: list[str], cookies: list[dict], limit: int = 24) -> list[str]:
+    """Collect og:image (full-size photo) from post pages."""
+    out: list[str] = []
+    ctx = browser.new_context(user_agent=_UA, viewport={"width": 1366, "height": 900})
+    if cookies:
+        ctx.add_cookies(cookies)
+    page = ctx.new_page()
+    try:
+        for href in hrefs[:limit]:
+            if not href.startswith("http"):
+                continue
+            try:
+                page.goto(href, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(random.randint(300, 700))
+                metas = page.eval_on_selector_all("meta[property='og:image']", "els => els.map(e => e.content)")
+                if metas and metas[0] and metas[0] not in out:
+                    out.append(metas[0])
+            except Exception:  # noqa: BLE001
+                continue
+    finally:
+        try:
+            page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def _scrape_authed(browser, username: str, cookies: list[dict]) -> dict:
     """Load a profile page and extract name/bio/followers/photo URLs."""
     ctx = browser.new_context(user_agent=_UA, viewport={"width": 1366, "height": 900})
@@ -743,6 +797,19 @@ def _scrape_authed(browser, username: str, cookies: list[dict]) -> dict:
             page.wait_for_timeout(random.randint(700, 1400))
         info = profile_from_page(page)
         info.update({"platform": "instagram", "username": username.lower()})
+
+        # The grid only carries small thumbnails, and its variants are a mix of
+        # photos and UI chrome with no reliable marker. Post pages expose the
+        # real photo via og:image, so prefer those when available.
+        try:
+            hrefs = page.eval_on_selector_all(
+                "a[href*='/p/'], a[href*='/reel/']", "els => els.map(e => e.href)"
+            ) or []
+        except Exception:  # noqa: BLE001
+            hrefs = []
+        full = _post_images(browser, list(dict.fromkeys(hrefs)), cookies, limit=24)
+        if full:
+            info["images"] = full + [u for u in info["images"] if u not in full]
         return info
     finally:
         try:

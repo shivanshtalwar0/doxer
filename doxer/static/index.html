@@ -640,8 +640,10 @@ async function stopSweep() {
       clearInterval(fast);
       finishRun();
       loadResults();
-      $('#curtext').textContent = 'stopped';
+      setStage(d.stage || 'done');
+      $('#curtext').textContent = d.status === 'cancelled' ? 'stopped' : d.status;
       $('#currentact').className = 'currentact idle';
+      $('#nowwrap').classList.remove('scanning');
     }
   }, 500);
   setTimeout(() => clearInterval(fast), 20000);
@@ -649,7 +651,6 @@ async function stopSweep() {
 
 function finishRun() {
   RUNNING = false;
-  try { localStorage.removeItem('doxer_sid'); } catch (e) {}
   $('#sweepbtn').disabled = false; $('#stopbtn').disabled = true;
   $('#recdot').style.display = 'none';
   clearInterval(POLL); POLL = null;
@@ -841,7 +842,7 @@ async function reattach() {
   let sessions = [];
   try { sessions = await api('/api/sessions'); } catch (e) { return; }
   const running = sessions.find(x => x.status === 'running');
-  const target = running || (sid ? sessions.find(x => x.id === sid) : null);
+  const target = running || (sid ? sessions.find(x => x.id === sid) : null) || sessions[0];
   if (!target) {
     try { localStorage.removeItem('doxer_sid'); } catch (e) {}
     return;

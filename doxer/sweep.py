@@ -141,6 +141,13 @@ class SweepRunner:
             if prof is None:
                 self._act(f"@{r['username']} already seen — skipped", "profile", "ok", pct)
                 continue
+            if self.cancelled:
+                # stopped part-way through this profile: keep what we indexed
+                # and exit immediately rather than starting another one
+                self._act(f"@{r['username']}: stopped after {prof['n_images']} photos",
+                          "profile", "warn", pct)
+                self._set(n_profiles=n_prof, n_images=n_img, n_faces=n_faces)
+                return self._finish_cancelled()
             indexed.append(prof)
             n_prof += 1
             n_img += prof["n_images"]
