@@ -46,6 +46,21 @@ def create_app(pipeline) -> FastAPI:
 
     app = FastAPI(title="doxer", version="0.1.0")
 
+    # A server restart orphans any sweep that was running: its thread is gone,
+    # so the session would sit in "running" forever and every page load would
+    # reattach to a corpse. Mark those at startup.
+    try:
+        with db._lock, db._conn() as c:
+            cur = c.execute(
+                "UPDATE sessions SET status='error', stage='done', message=?, updated_at=? "
+                "WHERE status='running'",
+                ("interrupted by a server restart", __import__("time").time()),
+            )
+            if cur.rowcount:
+                print(f"[doxer] marked {cur.rowcount} orphaned sweep(s) as interrupted")
+    except Exception:  # noqa: BLE001
+        pass
+
     @app.get("/api/stats")
     def stats():
         return pipeline.stats()
@@ -234,8 +249,14 @@ def create_app(pipeline) -> FastAPI:
                     workers=max(1, min(8, body.workers)),
                     index_workers=max(1, min(8, body.index_workers)),
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except BaseException as e:  # noqa: BLE001
+                # Never leave the session "running" after the worker dies:
+                # the UI would poll a dead run forever and look stuck.
+                import traceback
+
+                db.update_session(sid, status="error", stage="done",
+                                  message=f"{type(e).__name__}: {e}")
+                traceback.print_exc()
 
         threading.Thread(target=work, daemon=True).start()
         return {"session": sid}

@@ -389,7 +389,7 @@ async function refresh() {
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // ---------------------------------------------------------------- state
-let SID = null, POLL = null, LAST_ID = 0, ACT_ID = 0, PHOTO = null, RUNNING = false, T0 = 0;
+let SID = null, POLL = null, LAST_ID = 0, ACT_ID = 0, PHOTO = null, RUNNING = false, T0 = 0, LASTACT = 0;
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 function band(s) { return s >= .6 ? 'strong' : (s >= .45 ? 'possible' : 'weak'); }
@@ -604,6 +604,11 @@ async function startSweep() {
   $('#curtext').textContent = 'starting…';
   $('#currentact').className = 'currentact';
   setStage('probing');
+  if (window.TICK) clearInterval(window.TICK);
+  window.TICK = setInterval(() => {
+    if (!RUNNING) { clearInterval(window.TICK); return; }
+    $('#curt').textContent = elapsed() + ' elapsed';
+  }, 1000);
 
   try {
     // upload the photo first so the session has a real query image
@@ -747,6 +752,21 @@ function elapsed() {
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 }
 
+// Wall-clock hh:mm:ss for a row -- a constant "5:27" on every line told the
+// user nothing and made a live run look frozen.
+function clockTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+
+function sinceLast() {
+  const now = Date.now();
+  const ms = LASTACT ? now - LASTACT : 0;
+  LASTACT = now;
+  if (ms < 1000) return '';
+  return '+' + (ms < 60000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms / 60000) + 'm');
+}
+
 function renderAct(a) {
   // banner shows the newest running line
   if (a.state === 'run' && !/^FOUND/.test(a.label)) {
@@ -779,9 +799,13 @@ function addActRow(a) {
   if (box.querySelector('.empty')) box.innerHTML = '';
   const d = document.createElement('div');
   d.className = 'step ' + (a.state || 'run');
-  d.innerHTML = `<span class="dot"></span><span class="lbl">${esc(a.label)}</span><span class="t">${elapsed()}</span>`;
+  const when = a.created_at ? clockTime(a.created_at * 1000) : clockTime(Date.now());
+  d.innerHTML = `<span class="dot"></span><span class="lbl">${esc(a.label)}</span>`
+    + `<span class="t">${when}</span>`;
   box.prepend(d);
+  // newest first, so the top of the list is always "now"
   while (box.children.length > 250) box.lastChild.remove();
+  LASTACT = Date.now();
 }
 
 function showCurrent(c) {

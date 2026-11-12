@@ -111,6 +111,10 @@ class SweepRunner:
                              network_max, workers, index_workers)
         except _Cancelled:
             return self._finish_cancelled()
+        except BaseException as e:  # noqa: BLE001
+            db.update_session(self.sid, status="error", stage="done",
+                              message=f"{type(e).__name__}: {e}")
+            raise
         except Exception as e:  # noqa: BLE001
             db.update_session(self.sid, status="error", message=f"{type(e).__name__}: {e}")
             raise
