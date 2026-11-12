@@ -398,6 +398,51 @@ def _single_sweep_engine():
     assert not hasattr(Pipeline, "sweep"), "Pipeline.sweep duplicates SweepRunner"
 
 
+# ------------------------------------------------------- institution mode
+
+
+@check("institution search terms cover both kinds")
+def _inst_terms():
+    from doxer.institutions import SEARCH_TERMS, search_url
+
+    assert "school" in SEARCH_TERMS and "college" in SEARCH_TERMS
+    url = search_url("school in Muzaffarnagar")
+    assert url.startswith("https://www.google.com/maps/search/")
+    assert " " not in url, "query must be URL-encoded"
+
+
+@check("maps website URLs are normalised, not Google redirects")
+def _inst_website():
+    from doxer.institutions import _normalise_website
+
+    assert _normalise_website("http://www.holyangel.in/") == "http://www.holyangel.in/"
+    wrapped = "https://www.google.com/url?q=http://school.example/&sa=D"
+    assert _normalise_website(wrapped) == "http://school.example/"
+    assert _normalise_website("") == ""
+    assert _normalise_website("javascript:void(0)") == ""
+
+
+@check("gallery crawl rejects decorative images and keeps photos")
+def _gallery_filter():
+    from doxer.galleries import looks_like_gallery_link, looks_like_photo
+
+    assert not looks_like_photo("http://x/assets/images/round.png")
+    assert not looks_like_photo("http://x/img/logo.png")
+    assert looks_like_photo("http://x/wp-content/uploads/2023/08/IMG_123.jpg")
+    assert looks_like_photo("http://x/gallery/photo12.jpg")
+    assert looks_like_gallery_link("http://x/gallery", "Photo Gallery")
+    assert not looks_like_gallery_link("http://x/contact", "Contact Us")
+
+
+@check("institution results only surface high-confidence hits")
+def _inst_threshold():
+    from doxer import config
+
+    assert config.INSTITUTION_MIN_SCORE >= config.SCORE_POSSIBLE, \
+        "institution mode must be stricter than the social sweep"
+    assert config.INSTITUTION_MIN_SCORE <= config.SCORE_STRONG + 0.1
+
+
 # --------------------------------------------------------------------- main
 
 

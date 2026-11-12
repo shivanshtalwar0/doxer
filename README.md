@@ -88,6 +88,36 @@ work** — it logs in first and records the run as a session.
 City abbreviations live in `doxer/candidates.py` (`DEFAULT_CITY_SHORT`) — add a
 town there to get its shorthands.
 
+## School / college mode
+
+A second tab, for a different question: *is this face on any school or college
+website in this city?*
+
+```bash
+# web UI -> "School / college search" tab
+#   first name + optional last name
+#   city
+#   Schools / Colleges / Both
+#   a face photo -> Find institutions -> Crawl galleries
+```
+
+Chain: Google Maps search for schools/colleges in the city -> their websites ->
+gallery/photo pages -> every image -> every face -> cosine vs your photo.
+
+Notes on the design:
+
+- **Maps, not OpenStreetMap.** Overpass was tried first: 17 places for
+  Muzaffarnagar, one with a website. Maps returns 60+ places and resolves a
+  website for most.
+- **The name is context, not a filter.** Matching is by face; the name is
+  recorded with the hit so you can confirm it.
+- **High-confidence only.** Gallery photos are group shots at mixed resolution,
+  so ``INSTITUTION_MIN_SCORE`` (0.55) gates what is shown. Raise it to 0.60 to
+  see only STRONG matches.
+- Gallery crawling is bounded (pages per site, images per site) and stays on
+  the institution's own host. Expired certificates on small-school sites are
+  tolerated: the crawl only reads public images.
+
 ## Web UI
 
 `python3 -m doxer serve` → http://127.0.0.1:8321

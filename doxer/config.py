@@ -38,6 +38,18 @@ SWEEP_NETWORK_PHOTOS = 12      # photos indexed per related account
 SWEEP_NETWORK_MAX = 40         # related accounts followed per hit
 SWEEP_NETWORK_DEPTH = 1        # how many hops outward to follow related accounts
 
+# Institution (school/college) mode
+# Only high-confidence matches are surfaced here; gallery photos are often
+# group shots at low resolution, so a "possible" band is not worth showing.
+INSTITUTION_MIN_SCORE = 0.55
+INSTITUTION_MAX_PLACES = 80        # Maps results to collect per search
+INSTITUTION_MAX_SITES = 60         # websites to crawl concurrently
+INSTITUTION_MAX_IMAGES = 25        # gallery images per site
+INSTITUTION_WORKERS = 4            # parallel site crawlers
+INSTITUTION_PAGE_TIMEOUT = 25_000  # ms per page inside an institution site
+INSTITUTION_SEARCH_TIMEOUT = 300   # seconds for the whole Maps discovery pass
+INSTITUTION_VISIT_GALLERY_PAGES = 6  # extra gallery pages followed per site
+
 # cosine-similarity bands used in the UI
 SCORE_STRONG = 0.60
 SCORE_POSSIBLE = 0.45

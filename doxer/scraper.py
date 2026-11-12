@@ -54,7 +54,13 @@ class BrowserPool:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=headless)
+                browser = p.chromium.launch(
+                    headless=headless,
+                    # Local school/college sites frequently have expired or
+                    # misconfigured certificates. Chrome must not refuse to
+                    # render them: we only read public gallery images.
+                    args=["--ignore-certificate-errors"],
+                )
                 self._ready.set()
                 while True:
                     item = self._q.get()

@@ -32,11 +32,21 @@
   .logo span { color: var(--accent); }
   .stats { margin-left: auto; color: var(--dim); font-size: 12.5px; display: flex; gap: 14px; }
   .stats b { color: var(--text); font-weight: 600; }
+  .tabs { display: flex; gap: 4px; margin-left: 18px; }
+  .tab {
+    background: transparent; border: 1px solid transparent; color: var(--dim);
+    font-weight: 500; font-size: 13px; padding: 7px 14px; border-radius: 8px;
+  }
+  .tab:hover { color: var(--text); background: rgba(110,168,254,.06); filter: none; }
+  .tab.on { color: var(--text); background: var(--panel2); border-color: var(--line); font-weight: 600; }
+
   main {
     display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px;
     padding: 20px 22px; max-width: 1400px; margin: 0 auto;
     align-items: start;
   }
+  /* institution tab: no live-image column, just form + results */
+  main[data-tab="institution"] { grid-template-columns: 420px minmax(0, 1fr); }
   main > section { min-width: 0; }          /* let columns shrink below content */
   @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; overflow: hidden; }
@@ -164,6 +174,16 @@
     background: linear-gradient(90deg, rgba(21,24,29,0), var(--panel));
   }
 
+  /* institution tab */
+  .inst-grid { display: grid; grid-template-columns: 420px minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 1000px) { .inst-grid { grid-template-columns: minmax(0, 1fr); } }
+  .instlist { max-height: 300px; overflow-y: auto; }
+  .instrow { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid rgba(38,43,51,.5); font-size: 12.5px; }
+  .instrow .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .instrow .site { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .instrow .kw { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--panel2); color: var(--dim); flex: none; }
+  .instrow.nosite .site { color: var(--low); }
+
   /* session log */
   .log { max-height: 230px; overflow-y: auto; font-size: 12px; }
   .log .row2 { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid rgba(38,43,51,.55); }
@@ -229,9 +249,14 @@
 <body>
 <header>
   <div class="logo">dox<span>er</span></div>
+  <nav class="tabs">
+    <button class="tab on" data-tab="social">Social search</button>
+    <button class="tab" data-tab="institution">School / college search</button>
+  </nav>
   <div class="stats" id="stats"></div>
 </header>
-<main>
+<main data-tab="social">
+  <div class="pane" id="pane-social" style="display:contents">
   <section>
     <div class="card">
       <h2>Instagram access</h2>
@@ -392,6 +417,95 @@
 
     <div id="results"></div>
   </section>
+  </div>
+
+  <!-- ============ institution tab: city schools/colleges -> galleries ============ -->
+  <div class="pane" id="pane-institution" style="display:none;grid-column:1/-1">
+    <div class="inst-grid">
+      <div>
+        <div class="card">
+          <h2>Who and where</h2>
+          <div class="field">
+            <label>First name</label>
+            <input type="text" id="ifirst" placeholder="abhay" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>Last name <span class="hint" style="margin:0;text-transform:none;letter-spacing:0">optional</span></label>
+            <input type="text" id="ilast" placeholder="rathi" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>City</label>
+            <input type="text" id="icity" placeholder="muzaffarnagar" spellcheck="false">
+          </div>
+
+          <label>Search</label>
+          <div class="chips" id="ikinds">
+            <button class="chip" data-k="school">Schools</button>
+            <button class="chip" data-k="college">Colleges</button>
+            <button class="chip on" data-k="both">Both</button>
+          </div>
+
+          <label style="margin-top:12px">Face to match</label>
+          <div class="drop" id="idrop">
+            <b>Drop a photo</b> or click to choose
+            <div class="hint" style="margin-top:4px">jpg / png / webp</div>
+          </div>
+          <input type="file" id="ifile" accept="image/*" style="display:none">
+          <div class="querythumbs" id="ithumbs"></div>
+          <div id="istatus"></div>
+
+          <div class="row" style="margin-top:14px">
+            <button id="ifind" onclick="instFindPlaces()">1 · Find institutions</button>
+            <button class="ghost" id="irun" onclick="instStart()" disabled>2 · Crawl galleries</button>
+          </div>
+          <div class="hint">finds every school/college in the city on Google Maps, opens their
+            websites, crawls photo galleries, then matches faces. Only high-confidence hits
+            are reported.</div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <h2>Institutions <span id="iplacescount" style="text-transform:none;letter-spacing:0"></span></h2>
+          <div id="iplaces" class="instlist"><div class="empty">run a search</div></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="livehead">
+            <span class="rec" id="irecdot" style="display:none"></span>
+            <span>STAGE <span class="val" id="istage">idle</span></span>
+            <span style="margin-left:auto" id="icounters"></span>
+          </div>
+          <div class="stages" id="istages">
+            <div class="stage" data-s="probing">Find</div>
+            <div class="stage" data-s="indexing">Crawl</div>
+            <div class="stage" data-s="matching">Match</div>
+            <div class="stage" data-s="done">Done</div>
+          </div>
+          <div class="nowwrap" id="inowwrap">
+            <div class="nowidle" id="inowidle">Pick a city and a face, then find institutions.</div>
+            <img class="nowimg" id="inowimg" style="display:none" alt="">
+            <div class="nowmeta" id="inowmeta" style="display:none"></div>
+          </div>
+          <div class="currentact" id="icurrentact">
+            <span class="cdot"></span><span id="icurtext">idle</span><span class="t" id="icurt"></span>
+          </div>
+          <div class="stripwrap"><div class="strip" id="istrip"></div></div>
+          <div class="steps" id="iactfeed"><div class="empty" style="padding:14px 0">no activity yet</div></div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <h2>High-confidence matches <span id="inresults" style="text-transform:none;letter-spacing:0"></span></h2>
+          <div class="tablewrap">
+            <table class="rtable">
+              <thead><tr><th></th><th>Institution</th><th>Score</th><th>Faces</th><th>Source</th></tr></thead>
+              <tbody id="irtbody"><tr><td colspan="5" class="empty">no run yet</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -951,6 +1065,243 @@ async function reattach() {
     await loadResults();
     addActRow({label: 'previous sweep: ' + target.status + ' — showing results', state: 'ok', step: 'done'});
   }
+}
+
+
+// ===================================================== institution (school/college) tab
+
+let IPHOTO = null, ISID = null, IPOLL = null, IACT = 0, ILAST = 0, IT0 = 0, IPLACES = [];
+
+// --- tab switching
+document.querySelectorAll('.tabs .tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tabs .tab').forEach(x => x.classList.remove('on'));
+  t.classList.add('on');
+  const which = t.dataset.tab;
+  document.querySelector('main').dataset.tab = which;
+  $('#pane-social').style.display = which === 'social' ? 'contents' : 'none';
+  $('#pane-institution').style.display = which === 'institution' ? 'block' : 'none';
+  if (which === 'institution') iReattach();
+});
+
+// --- what to search
+document.querySelectorAll('#ikinds .chip').forEach(c => c.onclick = () => {
+  document.querySelectorAll('#ikinds .chip').forEach(x => x.classList.remove('on'));
+  c.classList.add('on');
+});
+function instKinds() {
+  const el = document.querySelector('#ikinds .chip.on');
+  const k = el ? el.dataset.k : 'both';
+  return k === 'both' ? ['school', 'college'] : [k];
+}
+
+// --- photo
+$('#idrop').onclick = () => $('#ifile').click();
+$('#ifile').onchange = () => {
+  const f = $('#ifile').files[0];
+  if (f && f.type.startsWith('image/')) {
+    IPHOTO = f;
+    $('#ithumbs').innerHTML = `<img src="${URL.createObjectURL(f)}" alt="query">`;
+    $('#istatus').innerHTML = '<div class="hint" style="color:var(--good)">● photo ready</div>';
+  }
+  $('#ifile').value = '';
+};
+['dragover', 'dragenter'].forEach(ev => $('#idrop').addEventListener(ev, e => {
+  e.preventDefault(); $('#idrop').classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => $('#idrop').addEventListener(ev, e => {
+  e.preventDefault(); $('#idrop').classList.remove('over');
+}));
+$('#idrop').addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) {
+    IPHOTO = f;
+    $('#ithumbs').innerHTML = `<img src="${URL.createObjectURL(f)}" alt="query">`;
+    $('#istatus').innerHTML = '<div class="hint" style="color:var(--good)">● photo ready</div>';
+  }
+});
+
+function instQuery() {
+  const first = $('#ifirst').value.trim();
+  const last = $('#ilast').value.trim();
+  return { name: [first, last].filter(Boolean).join(' '), city: $('#icity').value.trim() };
+}
+
+// --- step 1: find institutions
+async function instFindPlaces() {
+  const { city } = instQuery();
+  if (!city) { alert('enter a city'); return; }
+  $('#ifind').disabled = true;
+  $('#iplaces').innerHTML = '<div class="job"><div class="spin"></div><span>searching Google Maps…</span></div>';
+  try {
+    const r = await api('/api/institutions/places', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ city, kinds: instKinds() })
+    });
+    IPLACES = r.places || [];
+    $('#iplacescount').textContent = `— ${r.n_places} found · ${r.n_websites} with a website`;
+    $('#iplaces').innerHTML = IPLACES.map(p => `
+      <div class="instrow ${p.website ? '' : 'nosite'}">
+        <span class="kw">${p.kind}</span>
+        <div style="min-width:0;flex:1">
+          <div class="nm">${esc(p.name)}</div>
+          <div class="site">${esc(p.website || 'no website')}</div>
+        </div>
+      </div>`).join('');
+    $('#irun').disabled = !IPHOTO;
+    iStatus(`found ${r.n_websites} website(s) — add a photo to crawl them`, 'var(--good)');
+  } catch (e) {
+    $('#iplaces').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  } finally { $('#ifind').disabled = false; }
+}
+
+function iStatus(text, colour) {
+  $('#istatus').innerHTML = `<div class="hint" style="color:${colour || 'var(--dim)'}">● ${esc(text)}</div>`;
+}
+
+// --- step 2: crawl + match
+async function instStart() {
+  const { name, city } = instQuery();
+  if (!city) { alert('enter a city'); return; }
+  if (!IPHOTO) { alert('add a face photo first'); return; }
+
+  $('#irun').disabled = true; $('#ifind').disabled = true;
+  $('#irecdot').style.display = 'inline-block';
+  $('#iactfeed').innerHTML = ''; $('#istrip').innerHTML = '';
+  $('#irtbody').innerHTML = '<tr><td colspan="5" class="empty">crawling…</td></tr>';
+  $('#inowimg').style.display = 'none'; $('#inowmeta').style.display = 'none';
+  $('#inowidle').style.display = 'block';
+  $('#inowidle').textContent = 'uploading photo…';
+  IACT = 0; ILAST = 0; IT0 = Date.now(); IPOLL && clearInterval(IPOLL);
+
+  try {
+    const fd = new FormData(); fd.append('file', IPHOTO);
+    const up = await api('/api/query-image', { method: 'POST', body: fd });
+    const r = await api('/api/institutions/sweep', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ city, name, kinds: instKinds(), query_image: up.path })
+    });
+    ISID = r.session;
+    try { localStorage.setItem('doxer_isid', ISID); } catch (e) {}
+    IPOLL = setInterval(iPoll, 1500);
+  } catch (e) {
+    iActRow({label: 'error: ' + e.message, state: 'error'});
+    instFinish();
+  }
+}
+
+function instFinish() {
+  $('#irun').disabled = false; $('#ifind').disabled = false;
+  $('#irecdot').style.display = 'none';
+  if (IPOLL) { clearInterval(IPOLL); IPOLL = null; }
+}
+
+function iSetStage(stage) {
+  const order = ['probing', 'indexing', 'matching', 'done'];
+  const idx = order.indexOf(stage), finished = stage === 'done';
+  document.querySelectorAll('#istages .stage').forEach(el => {
+    const i = order.indexOf(el.dataset.s);
+    el.classList.toggle('done', finished || i < idx);
+    el.classList.toggle('on', !finished && i === idx);
+  });
+  $('#istage').textContent = stage || 'idle';
+}
+
+function iActRow(a) {
+  const box = $('#iactfeed');
+  if (box.querySelector('.empty')) box.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'step ' + (a.state || 'run');
+  const when = a.created_at ? clockTime(a.created_at * 1000) : clockTime(Date.now());
+  d.innerHTML = `<span class="dot"></span><span class="lbl">${esc(a.label)}</span><span class="t">${when}</span>`;
+  box.prepend(d);
+  while (box.children.length > 200) box.lastChild.remove();
+}
+
+async function iPoll() {
+  if (!ISID) return;
+  let d;
+  try { d = await api(`/api/sessions/${ISID}/checks?after=${ILAST}&limit=40&act_after=${IACT}`); }
+  catch (e) { return; }
+
+  iSetStage(d.stage);
+  $('#icounters').innerHTML =
+    `<span class="val">${d.n_candidates || 0}</span> institutions · `
+    + `<span class="val">${d.n_images || 0}</span> photos · `
+    + `<span class="val">${d.n_faces || 0}</span> faces · `
+    + `<span class="val ${bcls(d.best_score)}">${pct(d.best_score)}%</span> best`;
+
+  for (const a of (d.activity || [])) {
+    IACT = Math.max(IACT, a.id);
+    iActRow(a);
+    if (a.state === 'run') { $('#icurtext').textContent = a.label; $('#icurt').textContent = elapsed(); }
+  }
+
+  for (const c of (d.checks || [])) {
+    ILAST = Math.max(ILAST, c.id);
+    const img = $('#inowimg'), meta = $('#inowmeta');
+    $('#inowidle').style.display = 'none';
+    img.style.display = 'block'; meta.style.display = 'flex';
+    if (c.thumb_b64) img.src = `data:image/jpeg;base64,${c.thumb_b64}`;
+    $('#inowwrap').classList.add('scanning');
+    const col = c.best_score >= .6 ? 'var(--good)' : (c.best_score >= .45 ? 'var(--mid)' : 'var(--low)');
+    meta.innerHTML = `<span><b>${esc((c.profile_id || '').replace(/_/g, ' '))}</b></span>`
+      + `<span>${c.n_faces} face${c.n_faces === 1 ? '' : 's'} · <b style="color:${col}">${pct(c.best_score)}%</b></span>`;
+    const cell = document.createElement('img');
+    cell.src = c.thumb_b64 ? `data:image/jpeg;base64,${c.thumb_b64}` : '';
+    if (c.best_score >= .55) cell.className = 'hit';
+    $('#istrip').prepend(cell);
+    while ($('#istrip').children.length > 80) $('#istrip').lastChild.remove();
+  }
+
+  if (d.status !== 'running') {
+    instFinish();
+    $('#inowwrap').classList.remove('scanning');
+    await iLoadResults();
+    $('#icurtext').textContent = d.message || d.status;
+  }
+}
+
+async function iLoadResults() {
+  if (!ISID) return;
+  let s;
+  try { s = await api(`/api/sessions/${ISID}`); } catch (e) { return; }
+  const rows = (s.profiles || []).slice().sort((a, b) => b.best_score - a.best_score);
+  const hits = rows.filter(r => (r.best_score || 0) >= 0.55);
+  $('#inresults').textContent = `— ${hits.length} of ${rows.length} institutions`;
+  if (!rows.length) {
+    $('#irtbody').innerHTML = '<tr><td colspan="5" class="empty">no institutions crawled</td></tr>';
+    return;
+  }
+  const show = hits.length ? hits : rows.slice(0, 25);
+  $('#irtbody').innerHTML = show.map(p => {
+    let raw = {};
+    try { raw = JSON.parse(p.raw || '{}'); } catch (e) {}
+    const href = raw.website || p.source_url || '#';
+    return `<tr>
+      <td>${'<div style="width:34px;height:34px;background:var(--panel2);border-radius:6px"></div>'}</td>
+      <td><b>${esc(p.full_name || p.username)}</b>
+          <div style="color:var(--dim);font-size:11px">${esc(raw.kind || '')} · ${esc(p.bio || '')}</div></td>
+      <td class="scorecell ${bcls(p.best_score)}">${pct(p.best_score)}%</td>
+      <td style="color:var(--dim)">${p.n_faces}</td>
+      <td><a href="${esc(href)}" target="_blank" rel="noopener">site ↗</a></td>
+    </tr>`;
+  }).join('');
+}
+
+async function iReattach() {
+  let sid = null;
+  try { sid = localStorage.getItem('doxer_isid'); } catch (e) {}
+  if (!sid) return;
+  try {
+    const s = await api('/api/sessions/' + sid);
+    ISID = sid;
+    iSetStage(s.stage);
+    await iLoadResults();
+    if (s.status === 'running') {
+      $('#irecdot').style.display = 'inline-block';
+      IPOLL = setInterval(iPoll, 1500);
+    }
+  } catch (e) { /* no previous run */ }
 }
 
 loadAccounts();

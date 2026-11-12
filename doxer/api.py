@@ -2,7 +2,9 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from . import config
 
 STATIC = Path(__file__).parent / "static"
 
@@ -13,8 +15,6 @@ SERVABLE_SUBDIRS = ("images", "queries")
 
 def _safe_data_path(rel: str) -> Path | None:
     """Resolve `rel` inside an allow-listed data/ subdirectory, or None."""
-    from . import config
-
     data_root = config.DATA.resolve()
     candidate = (data_root / rel).resolve()
     try:
@@ -38,6 +38,17 @@ class LoginBody(BaseModel):
     password: str
     visible: bool = False
     wait_seconds: int = 420
+
+
+class InstitutionSearchBody(BaseModel):
+    city: str
+    kinds: list[str] = ["school", "college"]
+    name: str = ""
+    max_places: int = Field(default=80, ge=1, le=200)
+    max_sites: int = Field(default=60, ge=1, le=120)
+    max_images: int = Field(default=25, ge=1, le=60)
+    workers: int = Field(default=4, ge=1, le=8)
+    query_image: str | None = None
 
 
 class ChallengeAnswer(BaseModel):
@@ -288,6 +299,60 @@ def create_app(pipeline) -> FastAPI:
                 db.update_session(sid, status="error", stage="done",
                                   message=f"{type(e).__name__}: {e}")
                 traceback.print_exc()
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"session": sid}
+
+    @app.post("/api/institutions/places")
+    def institution_places(body: InstitutionSearchBody):
+        """Preview what a city search finds, before crawling galleries."""
+        from .institutions import search as search_places
+
+        try:
+            places = search_places(body.city, kinds=body.kinds,
+                                   max_places=min(body.max_places, 60), want_websites=True)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"{type(e).__name__}: {e}")
+        return {
+            "city": body.city,
+            "places": places,
+            "n_places": len(places),
+            "n_websites": sum(1 for p in places if p.get("website")),
+        }
+
+    @app.post("/api/institutions/sweep")
+    def start_institution_sweep(body: InstitutionSearchBody):
+        """Crawl every institution website in a city and match faces."""
+        from .institution_sweep import InstitutionRunner
+
+        if not body.city.strip():
+            raise HTTPException(400, "a city is required")
+        qimg = None
+        if body.query_image:
+            safe = _safe_data_path(body.query_image) or _safe_data_path(
+                str(Path(body.query_image).name))
+            qimg = str(safe) if safe else None
+        if not qimg:
+            qimg = str(config.DATA / "query.jpg")
+
+        attrs = {"city": body.city, "name": body.name}
+        sid = db.create_session(body.name or body.city, attrs, qimg, ["school", "college"])
+        runner = InstitutionRunner(sid, qimg, attrs, pipeline=pipeline)
+        _runners[sid] = runner
+
+        def work():
+            import traceback
+
+            try:
+                runner.run(body.city, body.kinds, name=body.name,
+                           max_places=body.max_places, max_sites=body.max_sites,
+                           max_images=body.max_images, workers=body.workers)
+            except BaseException as e:  # noqa: BLE001
+                db.update_session(sid, status="error", stage="done",
+                                  message=f"{type(e).__name__}: {e}")
+                traceback.print_exc()
+            finally:
+                _runners.pop(sid, None)
 
         threading.Thread(target=work, daemon=True).start()
         return {"session": sid}
