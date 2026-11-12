@@ -132,9 +132,12 @@ class SweepRunner:
             pct = 40 + int(45 * i / total)
             self._act(f"scraping profile {i}/{total}: @{r['username']}", "profile", "run", pct)
             try:
-                prof = self._index(r["username"], max_photos)
+                prof = self._index(r["username"], max_photos,
+                                   platform=r.get("platform", "instagram"))
             except Exception as e:  # noqa: BLE001
-                db.add_session_profile(self.sid, f"instagram_{r['username']}", username=r["username"],
+                _plat = r.get("platform", "instagram")
+                db.add_session_profile(self.sid, f"{_plat}_{r['username']}", platform=_plat,
+                                       username=r["username"],
                                        status="error", raw={"error": str(e)[:200]})
                 self._act(f"@{r['username']} failed: {type(e).__name__}", "profile", "warn", pct)
                 continue
@@ -170,7 +173,8 @@ class SweepRunner:
                     break
                 self._act(f"related {j}/{len(append)}: @{u}", "network", "run", 86 + int(4 * j / max(1, len(append))))
                 try:
-                    prof = self._index(u, min(max_photos, 12), via="network")
+                    prof = self._index(u, min(max_photos, 12), via="network",
+                                       platform="instagram")
                 except Exception:  # noqa: BLE001
                     continue
                 if prof:
@@ -255,18 +259,30 @@ class SweepRunner:
                         hits.append(dict(r))
         return hits
 
-    def _index(self, username: str, max_photos: int, via: str = "probe") -> dict | None:
+    def _scrape(self, platform: str, username: str) -> dict:
+        """Fetch one profile's metadata + photo URLs from its own platform."""
+        if platform == "instagram":
+            from .instagram import scrape_authed
+
+            return scrape_authed(username)
+        from .scraper import scrape_profile
+
+        if platform == "facebook":
+            return scrape_profile(f"https://www.facebook.com/{username}")
+        return scrape_profile(f"https://www.threads.com/@{username}")
+
+    def _index(self, username: str, max_photos: int, via: str = "probe",
+               platform: str = "instagram") -> dict | None:
         """Scrape + index one profile, recording a progress row per image."""
-        from .instagram import scrape_authed
-
         uname = username.lower()
-        if uname in self._seen:
+        key = f"{platform}:{uname}"
+        if key in self._seen:
             return None
-        self._seen.add(uname)
+        self._seen.add(key)
 
-        self._act(f"@{uname}: loading profile page", "scrape", "run")
-        info = scrape_authed(uname)
-        pid = f"instagram_{uname}"
+        self._act(f"{platform} @{uname}: loading profile page", "scrape", "run")
+        info = self._scrape(platform, uname)
+        pid = f"{platform}_{uname}"
         urls = list(info.get("images") or [])
         avatar = info.get("avatar")
         if avatar and avatar not in urls:
@@ -292,7 +308,7 @@ class SweepRunner:
             self._act(f"@{uname}: photo {k}/{n_total} — downloading", "image", "run")
             bgr, w, h = self.pipe.download(url)
             if bgr is None:
-                self._act(f"@{uname}: photo {k}/{n_total} — skipped (not an image)", "image", "warn")
+                self._act(f"{platform} @{uname}: photo {k}/{n_total} — skipped (not an image)", "image", "warn")
                 continue
 
             # Push the image to the UI the moment it lands, before detection,
@@ -302,7 +318,7 @@ class SweepRunner:
                 self.sid, profile_id=pid, image_path=url, thumb_b64=thumb,
                 n_faces=0, best_score=0.0, matched=False, stage="detecting",
             )
-            self._act(f"@{uname}: photo {k}/{n_total} — detecting faces", "image", "run")
+            self._act(f"{platform} @{uname}: photo {k}/{n_total} — detecting faces", "image", "run")
 
             faces = self.pipe.engine.detect(bgr)
             n_img += 1
@@ -330,7 +346,7 @@ class SweepRunner:
             self._best_by_profile[pid] = max(self._best_by_profile.get(pid, 0.0), img_score)
             state = "ok" if img_score >= config.SCORE_POSSIBLE else "run"
             self._act(
-                f"@{uname}: photo {k}/{n_total} — {len(faces)} face(s), best {img_score:.3f}",
+                f"{platform} @{uname}: photo {k}/{n_total} — {len(faces)} face(s), best {img_score:.3f}",
                 "image", state,
             )
 
@@ -338,7 +354,7 @@ class SweepRunner:
                                           bio=info.get("bio", ""), username=uname)
         db.add_session_profile(
             self.sid, pid,
-            platform="instagram", username=uname,
+            platform=platform, username=uname,
             full_name=info.get("name", ""), bio=info.get("bio", ""),
             city=self.attrs.get("city", ""),
             education=self.attrs.get("education", "") or self.attrs.get("school", ""),
@@ -347,12 +363,13 @@ class SweepRunner:
             best_score=profile_best,
             status="indexed" if n_faces else "no-faces",
             avatar_path=db.get_profile(pid).get("avatar_path", "") if db.get_profile(pid) else "",
-            source_url=f"https://www.instagram.com/{uname}/",
+            source_url=(f"https://www.instagram.com/{uname}/" if platform == "instagram"
+                        else f"https://www.{platform}.com/{uname}"),
             discovered_via=via,
             raw={"attribute_score": a_score, "attribute_hits": a_hits},
         )
-        return {"pid": pid, "username": uname, "n_images": n_img, "n_faces": n_faces,
-                "attr_score": a_score}
+        return {"pid": pid, "username": uname, "platform": platform,
+                "n_images": n_img, "n_faces": n_faces, "attr_score": a_score}
 
     def _related_usernames(self, indexed: list[dict]) -> list[str]:
         """Accounts suggested on the profiles we already have ('similar accounts')."""

@@ -10,6 +10,7 @@ import concurrent.futures
 import io
 import os
 import queue
+import random
 import re
 import threading
 import time
@@ -105,8 +106,12 @@ def parse_profile_url(url: str) -> tuple[str, str]:
     m = re.match(r"https?://(?:www\.)?(threads\.com)/@([A-Za-z0-9._]+)/?", u)
     if m:
         return "threads", m.group(1).lower()
-    m = re.match(r"https?://(?:www\.)?(facebook\.com)/(?:profile\.php\?id=(\d+)|([A-Za-z0-9._-]+))/?", u)
+    m = re.match(
+        r"https?://(?:www\.|m\.|web\.)?facebook\.com/(?:profile\.php\?id=(\d+)|([A-Za-z0-9._-]+))",
+        u,
+    )
     if m:
+        # group(1) = numeric id from profile.php, group(2) = vanity username
         uid = m.group(1) or m.group(2)
         if uid in {"sharer.php", "photo", "photo.php", "watch", "groups", "pages", "login", "home"}:
             raise ScrapeError("that looks like a Facebook feature link, not a profile: " + url)
@@ -217,13 +222,28 @@ def _probe_one(page, url: str) -> dict:
             return out
         if "isn't available" in tl or "page not found" in tl or "page isn't available" in tl:
             return out
+        # Facebook serves a login wall with title "Facebook" for missing pages,
+        # and Threads shows a generic "Threads • Log in" shell for the same.
+        if tl in ("", "facebook", "log in", "log into facebook"):
+            return out
+        if tl.startswith("threads") and ("log in" in tl or tl.strip() == "threads"):
+            return out
         if not title:
             return out
         out["exists"] = True
-        out["name"] = title.split("|")[0].strip()[:80]
+        name = title.split("|")[0].split("•")[0].strip()[:80]
+        out["name"] = name
     except Exception as e:  # noqa: BLE001
         out["error"] = str(e)[:120]
     return out
+
+
+def _profile_url(platform: str, username: str) -> str:
+    if platform == "instagram":
+        return f"https://www.instagram.com/{username}/"
+    if platform == "facebook":
+        return f"https://www.facebook.com/{username}"
+    return f"https://www.threads.net/@{username}/"
 
 
 def _probe_batch(browser, targets: list[tuple[str, str]], on_each=None, stop=None) -> list[dict]:
@@ -235,7 +255,7 @@ def _probe_batch(browser, targets: list[tuple[str, str]], on_each=None, stop=Non
         for platform, username in targets:
             if stop and stop():
                 break
-            url = f"https://www.instagram.com/{username}/" if platform == "instagram" else f"https://www.threads.net/@{username}/"
+            url = _profile_url(platform, username)
             r = _probe_one(page, url)
             rec = {"platform": platform, "username": username, "url": url, **r}
             out.append(rec)
@@ -330,39 +350,155 @@ def _scrape_threads(browser, username: str):
     }
 
 
-def _scrape_facebook(browser, uid: str):
-    url = f"https://www.facebook.com/{uid}"
-    page = browser.new_page()
-    try:
-        page.set_viewport_size({"width": 1366, "height": 900})
-        page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT)
-        try:
-            page.wait_for_selector("img[src*='scontent'], img[src*='fbsbx']", timeout=20_000)
-        except Exception:  # noqa: BLE001
-            pass
-        page.wait_for_timeout(2500)
+# Facebook encodes image classes in its CDN path / host:
+#   static.xx.fbcdn.net            UI assets (icons, sprites)
+#   scontent-*.xx.fbcdn.net/t39.*  post photos (and t1.* thumbnails)
+#   t39.30808-1 / t1.*             profile pictures
+_FB_STATIC_HOSTS = ("static.xx.fbcdn.net", "static.facebook.com")
+_FB_PHOTO_HINTS = ("/t39.", "/t1.", "/t15.", "/t51.")
 
-        avatar = None
+
+def _is_fb_photo(url: str) -> bool:
+    low = url.lower()
+    if any(h in low for h in _FB_STATIC_HOSTS):
+        return False
+    return "fbcdn.net" in low and any(h in low for h in _FB_PHOTO_HINTS)
+
+
+def _fb_page_info(page) -> dict:
+    """Name, follower count and 'About' text from a Facebook page."""
+    name = ""
+    followers = 0
+    bio = ""
+    try:
+        name = (page.title() or "").split("|")[0].strip()[:80]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        body = page.inner_text("body") or ""
+    except Exception:  # noqa: BLE001
+        body = ""
+    import re as _re
+
+    # "28 mln. volgers • 52 volgend" / "1.2M followers"
+    m = _re.search(r"([\d.,]+)\s*([KkMmBb]|mln|tys)?\.?\s*(?:followers|volgers|Abonnenten|seguidores)", body)
+    if m:
+        val = m.group(1).replace(".", "").replace(",", ".")
+        try:
+            n = float(val)
+        except ValueError:
+            n = 0.0
+        unit = (m.group(2) or "").lower()
+        mult = 1
+        if unit in ("k", "tys"):
+            mult = 1_000
+        elif unit in ("m", "mln"):
+            mult = 1_000_000
+        elif unit == "b":
+            mult = 1_000_000_000
+        followers = int(n * mult)
+    for marker in ("About", "Info", "Over"):
+        if marker in body:
+            seg = body.split(marker, 1)[1].strip().splitlines()[:3]
+            bio = " | ".join(x.strip() for x in seg if x.strip())[:300]
+            break
+    return {"name": name, "followers": followers, "bio": bio}
+
+
+def _scrape_facebook(browser, uid: str):
+    """Scrape a Facebook page/profile: name, followers, photos."""
+    url = f"https://www.facebook.com/{uid}"
+    ctx = browser.new_context(viewport={"width": 1366, "height": 900}, user_agent=config.UA)
+    page = ctx.new_page()
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT)
+        status = resp.status if resp is not None else None
+        page.wait_for_timeout(3000)
+
+        title = (page.title() or "").strip()
+        # Facebook answers a missing page with HTTP 200 and a login wall, so the
+        # status code proves nothing. A real page's title carries its name;
+        # a walled/missing one is just "Facebook".
+        title_low = title.lower()
+        walled = title_low in ("", "facebook", "log in", "log into facebook")
+        if status == 404 or walled or "page isn" in title_low or "not found" in title_low:
+            raise ScrapeError(f"facebook page not found or not public: {uid}")
+
+        # Load more of the timeline so the grid has real photos, not just icons.
+        for _ in range(3):
+            try:
+                page.mouse.wheel(0, 1600)
+                page.wait_for_timeout(random.randint(800, 1400))
+            except Exception:  # noqa: BLE001
+                break
+
+        info = _fb_page_info(page)
+
         try:
             avatar = _first_meta(page, "og:image")
         except Exception:  # noqa: BLE001
-            pass
-        name = ""
+            avatar = None
+
         try:
-            name = (page.title() or "").split("|")[0].strip()
+            srcs = page.eval_on_selector_all(
+                "img[src*='fbcdn.net']", "els => els.map(e => e.currentSrc || e.src)"
+            ) or []
+        except Exception:  # noqa: BLE001
+            srcs = []
+        photos = [s for s in dict.fromkeys(srcs) if s and _is_fb_photo(s)]
+
+        # Prefer full-size photos from the photo viewer pages.
+        try:
+            links = page.eval_on_selector_all(
+                "a[href*='/photo/?fbid='], a[href*='/photo.php?fbid=']", "els => els.map(e => e.href)"
+            ) or []
+        except Exception:  # noqa: BLE001
+            links = []
+        full = _fb_photo_images(ctx, list(dict.fromkeys(links))[:24])
+        images = full + [u for u in photos if u not in full]
+    finally:
+        try:
+            page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ctx.close()
         except Exception:  # noqa: BLE001
             pass
 
-        imgs = _collect(page, ["img[src*='scontent']", "img[src*='fbsbx']"])
-    finally:
-        page.close()
     return {
         "platform": "facebook",
         "username": uid,
-        "name": name,
+        "name": info["name"],
+        "followers": info["followers"],
+        "bio": info["bio"],
         "avatar": avatar,
-        "images": [i["src"] for i in imgs][:60],
+        "images": images[:60],
     }
+
+
+def _fb_photo_images(ctx, links: list[str]) -> list[str]:
+    """og:image from Facebook photo pages — these are full resolution."""
+    out: list[str] = []
+    if not links:
+        return out
+    page = ctx.new_page()
+    try:
+        for href in links:
+            try:
+                page.goto(href, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(random.randint(250, 600))
+                metas = page.eval_on_selector_all("meta[property='og:image']", "els => els.map(e => e.content)")
+                if metas and metas[0] and metas[0] not in out:
+                    out.append(metas[0])
+            except Exception:  # noqa: BLE001
+                continue
+    finally:
+        try:
+            page.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 # ------------------------------------------------------------------ download

@@ -130,6 +130,41 @@ def _dedupe():
     assert cands[0].startswith("anant"), "plain join should come early"
 
 
+# ------------------------------------------------------------- fb parsing
+
+
+@check("facebook URLs parse to the page name, not the domain")
+def _fb_urls():
+    from doxer.scraper import parse_profile_url
+
+    cases = {
+        "https://www.facebook.com/nasa": ("facebook", "nasa"),
+        "https://facebook.com/nasa/": ("facebook", "nasa"),
+        "https://m.facebook.com/nasa": ("facebook", "nasa"),
+        "https://www.facebook.com/profile.php?id=123456": ("facebook", "123456"),
+        "https://www.facebook.com/nasa?ref=x": ("facebook", "nasa"),
+    }
+    for url, want in cases.items():
+        assert parse_profile_url(url) == want, f"{url} -> {parse_profile_url(url)} != {want}"
+
+
+@check("facebook photo filter rejects static assets")
+def _fb_filter():
+    from doxer.scraper import _is_fb_photo
+
+    assert _is_fb_photo("https://scontent-ams2-1.xx.fbcdn.net/v/t39.99422-6/x.jpg")
+    assert not _is_fb_photo("https://static.xx.fbcdn.net/rsrc.php/x.png")
+
+
+@check("probe builds the right URL per platform")
+def _probe_urls():
+    from doxer.scraper import _profile_url
+
+    assert _profile_url("instagram", "x") == "https://www.instagram.com/x/"
+    assert _profile_url("facebook", "x") == "https://www.facebook.com/x"
+    assert _profile_url("threads", "x") == "https://www.threads.net/@x/"
+
+
 # ---------------------------------------------------------------- attribute
 
 
