@@ -13,7 +13,6 @@ import queue
 import random
 import re
 import threading
-import time
 
 os.environ.setdefault(
     "PLAYWRIGHT_BROWSERS_PATH", str(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".browsers"))
@@ -38,10 +37,15 @@ class BrowserPool:
     def __init__(self, headless: bool = True):
         self._q: queue.Queue = queue.Queue()
         self._ready = threading.Event()
+        self._startup_error: BaseException | None = None
         self._t = threading.Thread(target=self._run, args=(headless,), daemon=True)
         self._t.start()
-        if not self._ready.wait(60):
+        if not self._ready.wait(config.BROWSER_START_TIMEOUT):
             raise ScrapeError("browser failed to start (is chromium installed?)")
+        # A failed launch used to be swallowed here, so every later call()
+        # blocked for its full timeout instead of reporting the real cause.
+        if self._startup_error is not None:
+            raise ScrapeError(f"browser failed to start: {self._startup_error}")
 
     def _run(self, headless: bool) -> None:
         try:
@@ -56,20 +60,40 @@ class BrowserPool:
                         break
                     fn, args, kw, fut = item
                     try:
-                        fut.set_result(fn(browser, *args, **kw))
-                    except Exception as e:  # noqa: BLE001
-                        fut.set_exception(e)
-        except Exception as e:  # noqa: BLE001
-            if not self._ready.is_set():
-                self._ready.set()
-                # surface via a sentinel future so callers get the error
-            if isinstance(e, Exception):
-                pass
+                        result = fn(browser, *args, **kw)
+                    except BaseException as e:  # noqa: BLE001
+                        if not fut.done():
+                            fut.set_exception(e)
+                        continue
+                    if not fut.done():      # caller may have timed out
+                        fut.set_result(result)
+        except BaseException as e:  # noqa: BLE001
+            # Record it: __init__ re-raises, so a dead browser surfaces as
+            # ScrapeError instead of every call() timing out.
+            self._startup_error = e
+            self._ready.set()
+        finally:
+            # Fail anything still queued so callers get an error, not a timeout.
+            while True:
+                try:
+                    item = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                if item is None:
+                    continue
+                _, _, _, fut = item
+                if not fut.done():
+                    fut.set_exception(ScrapeError("browser pool closed"))
 
     def call(self, fn, *args, timeout: int = 90, **kwargs):
+        if not self._t.is_alive() or self._startup_error is not None:
+            raise ScrapeError(f"browser pool is not running: {self._startup_error}")
         fut: concurrent.futures.Future = concurrent.futures.Future()
         self._q.put((fn, args, kwargs, fut))
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise ScrapeError(f"browser call timed out after {timeout}s") from None
 
     def close(self) -> None:
         try:
@@ -103,8 +127,10 @@ def parse_profile_url(url: str) -> tuple[str, str]:
         if user in {"p", "reel", "reels", "stories", "explore", "accounts", "direct", "tv"}:
             raise ScrapeError(f"that looks like a post/stories link, not a profile: {url}")
         return "instagram", user
-    m = re.match(r"https?://(?:www\.)?(threads\.com)/@([A-Za-z0-9._]+)/?", u)
+    m = re.match(r"https?://(?:www\.|m\.)?threads\.(?:com|net)/@([A-Za-z0-9._]+)", u)
     if m:
+        # group(1) is the handle; the old pattern captured the hostname instead,
+        # so every Threads profile was scraped as the literal user "threads.com".
         return "threads", m.group(1).lower()
     m = re.match(
         r"https?://(?:www\.|m\.|web\.)?facebook\.com/(?:profile\.php\?id=(\d+)|([A-Za-z0-9._-]+))",

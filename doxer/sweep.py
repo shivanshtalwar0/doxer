@@ -115,9 +115,6 @@ class SweepRunner:
             db.update_session(self.sid, status="error", stage="done",
                               message=f"{type(e).__name__}: {e}")
             raise
-        except Exception as e:  # noqa: BLE001
-            db.update_session(self.sid, status="error", message=f"{type(e).__name__}: {e}")
-            raise
 
     def _run(self, query, platforms, limit, max_photos, follow_network, network_max,
              workers, index_workers) -> dict:
@@ -204,9 +201,14 @@ class SweepRunner:
                     break
                 self._act(f"related {j}/{len(append)}: @{u}", "network", "run", 86 + int(4 * j / max(1, len(append))))
                 try:
-                    prof = self._index(u, min(max_photos, 12), via="network",
-                                       platform="instagram")
-                except Exception:  # noqa: BLE001
+                    prof = self._index(u, min(max_photos, config.SWEEP_NETWORK_PHOTOS),
+                                       via="network", platform="instagram")
+                except Exception as e:  # noqa: BLE001
+                    db.add_session_profile(self.sid, f"instagram_{u}", platform="instagram",
+                                           username=u, status="error",
+                                           discovered_via="network",
+                                           raw={"error": f"{type(e).__name__}: {e}"[:200]})
+                    self._act(f"related @{u} failed: {type(e).__name__}", "network", "warn")
                     continue
                 if prof:
                     n_prof += 1
@@ -217,8 +219,8 @@ class SweepRunner:
         # ---- 4. rank
         self._act("comparing every indexed face against your photo", "match", "run", 92)
         best = self._finalize()
-        band = "STRONG" if best >= 0.60 else ("possible" if best >= 0.45 else "no match")
-        state = "ok" if best >= 0.60 else ("warn" if best >= 0.45 else "ok")
+        band = config.band(best) if best >= config.SCORE_POSSIBLE else "no match"
+        state = "ok" if best >= config.SCORE_STRONG else "warn"
         self._act(f"finished — best score {best:.3f} ({band})", "done", state, 100)
         return {"status": "done", "n_profiles": n_prof, "n_images": n_img, "n_faces": n_faces, "best": best}
 
@@ -310,8 +312,17 @@ class SweepRunner:
         with self._lock:
             if key in self._seen:
                 return None
-            self._seen.add(key)
+            self._seen.add(key)   # attempted; removed again if the scrape fails
+        try:
+            return self._index_scraped(platform, uname, key, max_photos, via)
+        except Exception:
+            with self._lock:
+                self._seen.discard(key)   # transient failure must stay retryable
+            raise
 
+    def _index_scraped(self, platform: str, uname: str, key: str,
+                       max_photos: int, via: str) -> dict | None:
+        """Body of _index; runs with the handle already claimed in _seen."""
         self._act(f"{platform} @{uname}: loading profile page", "scrape", "run")
         info = self._scrape(platform, uname)
         pid = f"{platform}_{uname}"
@@ -386,7 +397,7 @@ class SweepRunner:
                 profile_best = max(profile_best, img_score)
                 with self._lock:
                     self._best_by_profile[pid] = max(self._best_by_profile.get(pid, 0.0), img_score)
-                state = "ok" if img_score >= config.SCORE_POSSIBLE else "run"
+                state = "ok" if config.band(img_score) != "weak" else "run"
                 self._act(
                     f"{platform} @{uname}: photo {k}/{n_total} — {len(faces)} face(s), best {img_score:.3f}",
                     "image", state,
@@ -404,7 +415,7 @@ class SweepRunner:
             n_images=n_img, n_faces=n_faces,
             best_score=profile_best,
             status="indexed" if n_faces else "no-faces",
-            avatar_path=db.get_profile(pid).get("avatar_path", "") if db.get_profile(pid) else "",
+            avatar_path=(db.get_profile(pid) or {}).get("avatar_path", ""),
             source_url=(f"https://www.instagram.com/{uname}/" if platform == "instagram"
                         else f"https://www.{platform}.com/{uname}"),
             discovered_via=via,
@@ -424,14 +435,17 @@ class SweepRunner:
             try:
                 for u in related_accounts(prof["username"]):
                     ul = u.lower()
-                    if ul not in self._seen and ul not in out:
+                    if f"instagram:{ul}" not in self._seen and ul not in out:
                         out.append(ul)
             except Exception:  # noqa: BLE001
                 continue
         return out
 
     def _finalize(self) -> float:
-        best = max(self._best_by_profile.values()) if self._best_by_profile else 0.0
+        # Score from THIS session's checks, not a global per-profile max: a
+        # profile indexed better by an earlier run must not inflate (or, when
+        # max_photos truncation hides the matching photo, misreport) this one.
+        best = db.session_best_score(self.sid)
         db.update_session(self.sid, status="done", stage="done", best_score=best,
                           message=f"done — best score {best:.3f}")
         return best

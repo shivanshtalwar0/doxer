@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 
-from . import db
+from . import config, db
 from .pipeline import Pipeline
 
 
@@ -102,7 +102,7 @@ def main() -> int:
                 print("no matches above threshold")
                 return 0
             for i, m in enumerate(res["matches"], 1):
-                band = "STRONG" if m["score"] >= 0.6 else ("possible" if m["score"] >= 0.45 else "weak")
+                band = config.band(m["score"])
                 name = m.get("display_name") or m["username"]
                 print(f"  {i:>2}. {m['platform']:<10} @{m['username']:<28} {m['score']:.3f}  {band}")
         return 0
@@ -157,7 +157,7 @@ def main() -> int:
         for m in best:
             print(f"  {m['band'].upper():<9} {m['score']:.3f}  @{m['username']:<26} {m['platform']:<10} {m['face_thumb']}")
         if not result["strong"]:
-            print("\nnothing reached STRONG (>=0.60) — treat all of the above as non-matches.")
+            print(f"\nnothing reached STRONG (>={config.SCORE_STRONG:.2f}) — treat all of the above as non-matches.")
         return 0
 
     if args.cmd == "list":

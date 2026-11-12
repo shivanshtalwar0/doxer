@@ -51,12 +51,6 @@ class RateLimiter:
                 self.waited += need
 
 
-def backoff_sleep(attempt: int, base: float = 1.5, cap: float = 30.0) -> None:
-    """Exponential backoff with jitter for retryable failures."""
-    delay = min(cap, base * (2 ** max(0, attempt - 1)))
-    time.sleep(delay * random.uniform(0.7, 1.3))
-
-
 class Throttle:
     """Combined gate used by the probe/scrape paths."""
 

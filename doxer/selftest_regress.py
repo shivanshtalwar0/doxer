@@ -246,6 +246,87 @@ def _missing_session():
     assert r.status_code == 404, f"expected 404, got {r.status_code}"
 
 
+
+
+# ------------------------------------------------- audit-found regressions
+
+
+@check("threads URL yields the handle, not the hostname")
+def _threads_handle():
+    from doxer.scraper import parse_profile_url
+
+    for url in ("https://www.threads.com/@zuck", "https://www.threads.net/@zuck",
+                "https://threads.com/@zuck"):
+        got = parse_profile_url(url)
+        assert got == ("threads", "zuck"), f"{url} -> {got}"
+
+
+@check("localised counts parse correctly")
+def _localised_counts():
+    from doxer.instagram import parse_count
+
+    for text, want in [("1,2 mln", 1_200_000), ("12.5K", 12_500), ("1,2K", 1_200),
+                       ("28.000", 28_000), ("1.234", 1_234), ("104M", 104_000_000)]:
+        got = parse_count(text)
+        assert got == want, f"{text!r} -> {got}, want {want}"
+
+
+@check("db file and paths outside images/ are not servable")
+def _no_db_exfil():
+    from doxer.api import _safe_data_path
+
+    for bad in ("doxer.db", "../doxer.db", "secrets.txt",
+                "images/../doxer.db", "/etc/passwd"):
+        assert _safe_data_path(bad) is None, f"{bad} should be refused"
+    assert _safe_data_path("images/p/000.jpg") is not None
+    assert _safe_data_path("queries/q.jpg") is not None
+
+
+@check("score bands match config thresholds")
+def _bands():
+    from doxer import config
+
+    assert config.band(config.SCORE_STRONG) == "strong"
+    assert config.band(config.SCORE_POSSIBLE) == "possible"
+    assert config.band(0.0) == "weak"
+
+
+@check("db connections do not leak file descriptors")
+def _no_fd_leak():
+    import os
+
+    from doxer import db
+
+    db.init()
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(100):
+        db.list_profiles()
+    for _ in range(100):
+        try:
+            with db._lock, db._conn() as c:
+                c.execute("SELECT * FROM definitely_not_a_table")
+        except Exception:  # noqa: BLE001
+            pass
+    after = len(os.listdir("/dev/fd"))
+    assert after - before <= 5, f"fd grew {before} -> {after}"
+
+
+@check("browser pool reports a dead thread instead of hanging")
+def _pool_fails_fast():
+    from doxer.scraper import BrowserPool, ScrapeError
+
+    pool = BrowserPool()
+    pool.close()
+    import time as _t
+
+    _t.sleep(0.5)
+    try:
+        pool.call(lambda b: 1, timeout=5)
+    except ScrapeError:
+        return
+    raise AssertionError("closed pool should raise ScrapeError, not block")
+
+
 # --------------------------------------------------------------------- main
 
 

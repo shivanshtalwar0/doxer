@@ -1,25 +1,47 @@
+import contextlib
 import json
 import sqlite3
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Iterator, Optional
 
 from . import config
 
 _lock = threading.Lock()
+_initialised = False
 
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(config.DB_PATH, timeout=30)
+@contextlib.contextmanager
+def _conn() -> Iterator[sqlite3.Connection]:
+    """Open a connection, commit on success, roll back on error, always close.
+
+    `with sqlite3.connect(...)` is a *transaction* manager, not a closing one:
+    an exception leaves the connection to the garbage collector, and each open
+    WAL connection holds its own file handles. Under the sweep's worker threads
+    that accumulated file descriptors.
+    """
+    c = sqlite3.connect(config.DB_PATH, timeout=config.DB_BUSY_TIMEOUT)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    try:
+        c.execute("PRAGMA foreign_keys=ON")
+        c.execute("PRAGMA busy_timeout=%d" % int(config.DB_BUSY_TIMEOUT * 1000))
+        yield c
+        c.commit()
+    except BaseException:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
 
 def init() -> None:
+    global _initialised
     with _lock, _conn() as c:
+        if not _initialised:
+            c.execute("PRAGMA journal_mode=WAL")   # persistent; once is enough
+            c.execute("PRAGMA synchronous=NORMAL")
+            _initialised = True
         c.executescript(
             """
             CREATE TABLE IF NOT EXISTS profiles (
@@ -261,10 +283,11 @@ def delete_profile(pid: str) -> None:
         c.execute("DELETE FROM profiles WHERE id=?", (pid,))
 
 
-def list_images(pid: str) -> list[dict]:
+def count_images(pid: str) -> int:
+    """Image count for a profile -- never materialises the rows."""
     with _lock, _conn() as c:
-        rows = c.execute("SELECT * FROM images WHERE profile_id=? ORDER BY id", (pid,)).fetchall()
-    return [dict(r) for r in rows]
+        row = c.execute("SELECT COUNT(*) FROM images WHERE profile_id=?", (pid,)).fetchone()
+    return int(row[0]) if row else 0
 
 
 def add_image(profile_id: str, url: str, path: str, w: int = 0, h: int = 0) -> int:
@@ -291,12 +314,6 @@ def all_faces() -> list[dict]:
             "SELECT f.id, f.profile_id, f.thumb_path, f.bbox, f.embedding, i.url AS image_url FROM faces f JOIN images i ON i.id=f.image_id"
         ).fetchall()
     return [dict(r) for r in rows]
-
-
-def profile_face_counts() -> dict:
-    with _lock, _conn() as c:
-        rows = c.execute("SELECT profile_id, COUNT(*) n FROM faces GROUP BY profile_id").fetchall()
-    return {r["profile_id"]: r["n"] for r in rows}
 
 
 # ------------------------------------------------------------------ sessions
@@ -444,6 +461,25 @@ def update_session_check(cid: int, **fields) -> None:
         c.execute(f"UPDATE session_checks SET {', '.join(sets)} WHERE id=?", vals)
 
 
+def session_best_score(sid: str) -> float:
+    """Highest score this session actually observed (not a global profile max)."""
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT COALESCE(MAX(best_score), 0.0) FROM session_checks WHERE session_id=?",
+            (sid,),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def delete_session(sid: str) -> None:
+    """Remove a session and its children atomically."""
+    with _lock, _conn() as c:
+        c.execute("DELETE FROM session_profiles WHERE session_id=?", (sid,))
+        c.execute("DELETE FROM session_checks WHERE session_id=?", (sid,))
+        c.execute("DELETE FROM progress WHERE scope='sweep' AND ref=?", (sid,))
+        c.execute("DELETE FROM sessions WHERE id=?", (sid,))
+
+
 def list_session_checks(sid: str, after_id: int = 0, limit: int = 200) -> list[dict]:
     with _lock, _conn() as c:
         rows = c.execute(
@@ -451,11 +487,6 @@ def list_session_checks(sid: str, after_id: int = 0, limit: int = 200) -> list[d
             (sid, after_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
-
-
-def clear_session_checks(sid: str) -> None:
-    with _lock, _conn() as c:
-        c.execute("DELETE FROM session_checks WHERE session_id=?", (sid,))
 
 
 # ------------------------------------------------------------------ accounts

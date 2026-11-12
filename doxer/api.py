@@ -1,10 +1,30 @@
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 STATIC = Path(__file__).parent / "static"
+
+# Paths under data/ that may be served by /img. Everything else -- notably
+# doxer.db with its plaintext credentials -- stays off the wire.
+SERVABLE_SUBDIRS = ("images", "queries")
+
+
+def _safe_data_path(rel: str) -> Path | None:
+    """Resolve `rel` inside an allow-listed data/ subdirectory, or None."""
+    from . import config
+
+    data_root = config.DATA.resolve()
+    candidate = (data_root / rel).resolve()
+    try:
+        candidate.relative_to(data_root)
+    except ValueError:
+        return None            # escaped data/ via '..' or an absolute path
+    parts = candidate.relative_to(data_root).parts
+    if not parts or parts[0] not in SERVABLE_SUBDIRS:
+        return None
+    return candidate
 
 
 class AddBody(BaseModel):
@@ -115,8 +135,11 @@ def create_app(pipeline) -> FastAPI:
         import time as _t
 
         name = f"q_{int(_t.time()*1000)}.jpg"
-        (qdir / name).write_bytes(data)
-        return {"path": str(qdir / name)}
+        target = qdir / name
+        target.write_bytes(data)
+        # Relative to data/ -- never hand the client an absolute host path that
+        # it would post straight back as a query_image.
+        return {"path": str(target.relative_to(config.DATA))}
 
     @app.post("/api/search")
     async def search(file: UploadFile = File(...)):
@@ -232,7 +255,15 @@ def create_app(pipeline) -> FastAPI:
 
         attrs = {k: v for k, v in body.model_dump().items()
                  if k in ("city", "education", "school", "employer", "hometown") and v}
-        qimg = body.query_image or str(_cfg.DATA / "query.jpg")
+        # Accept only paths inside data/ (relative or absolute), so a crafted
+        # query_image cannot make the worker read arbitrary local files.
+        qimg = None
+        if body.query_image:
+            safe = _safe_data_path(body.query_image) or _safe_data_path(
+                str(Path(body.query_image).name))
+            qimg = str(safe) if safe else None
+        if not qimg:
+            qimg = str(_cfg.DATA / "query.jpg")
         sid = db.create_session(body.name, attrs, qimg, body.platforms)
 
         runner = SweepRunner(sid, qimg, attrs, pipe=pipeline)
@@ -270,7 +301,12 @@ def create_app(pipeline) -> FastAPI:
         return s
 
     @app.get("/api/sessions/{sid}/checks")
-    def session_checks(sid: str, after: int = 0, limit: int = 60, act_after: int = 0):
+    def session_checks(
+        sid: str,
+        after: int = Query(0, ge=0),
+        limit: int = Query(60, ge=1, le=200),
+        act_after: int = Query(0, ge=0),
+    ):
         """Poll for images examined and activity lines since the given ids."""
         s = db.get_session(sid)
         if not s:
@@ -298,10 +334,9 @@ def create_app(pipeline) -> FastAPI:
 
     @app.delete("/api/sessions/{sid}")
     def session_delete(sid: str):
-        with db._lock, db._conn() as c:
-            c.execute("DELETE FROM session_profiles WHERE session_id=?", (sid,))
-            c.execute("DELETE FROM session_checks WHERE session_id=?", (sid,))
-            c.execute("DELETE FROM sessions WHERE id=?", (sid,))
+        if not db.get_session(sid):
+            raise HTTPException(404, "no such session")
+        db.delete_session(sid)
         _runners.pop(sid, None)
         return {"deleted": sid}
 
@@ -316,18 +351,29 @@ def create_app(pipeline) -> FastAPI:
         from fastapi.responses import FileResponse
 
         p = (STATIC / name).resolve()
-        if not str(p).startswith(str(STATIC.resolve())) or not p.is_file():
+        try:
+            p.relative_to(STATIC.resolve())
+        except ValueError:
+            raise HTTPException(404, "not found")
+        if not p.is_file():
             raise HTTPException(404, "not found")
         return FileResponse(str(p))
 
     @app.get("/img/{path:path}")
     def img(path: str):
+        """Serve scraped images and query photos.
+
+        Only the image subdirectories are servable. data/ also holds doxer.db,
+        which contains the account password and cookies in plaintext -- an
+        unrestricted /img/doxer.db handed those to anyone who could reach the
+        port.
+        """
         from fastapi.responses import FileResponse
 
         from . import config
 
-        p = (config.DATA / path).resolve()
-        if not str(p).startswith(str(config.DATA.resolve())) or not p.is_file():
+        p = _safe_data_path(path)
+        if p is None or not p.is_file():
             raise HTTPException(404, "not found")
         return FileResponse(str(p))
 

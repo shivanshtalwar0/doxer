@@ -66,9 +66,6 @@ class FaceEngine:
         self.app = FaceAnalysis(name="buffalo_l", providers=self.providers)
         self.app.prepare(ctx_id=-1, det_size=det_size)
 
-    def describe(self) -> dict:
-        return {"providers": self.providers, "accelerator": _accelerator_name(self.providers)}
-
     @staticmethod
     def _crop_thumb(bgr: np.ndarray, bbox: list, size: int = config.THUMB_SIZE) -> np.ndarray:
         h, w = bgr.shape[:2]

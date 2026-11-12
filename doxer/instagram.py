@@ -37,14 +37,6 @@ class Checkpoint(ScrapeError):
 # ------------------------------------------------------------------ login
 
 
-def _restore_cookies(browser, cookies: list[dict]) -> None:
-    if not cookies:
-        return
-    ctx = browser.new_context(user_agent=_UA, viewport={"width": 1366, "height": 900})
-    ctx.add_cookies(cookies)
-    return ctx
-
-
 _CODE_HINTS = (
     "enter the code", "enter code", "confirmation code", "security code",
     "we sent", "we've sent", "sent a code", "sent an email", "check your email",
@@ -399,16 +391,45 @@ def _visible(el) -> bool:
 _COUNT_SUFFIX = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
 
 
-def parse_count(s: str) -> int:
-    s = (s or "").strip().lower().replace(",", "")
-    m = re.match(r"([\d.]+)\s*([kmb])?", s)
+# Locales differ on the decimal mark and on the multiplier word:
+#   en "1.2K" / "12,500"   nl "28.000 volgers"   it "1,2 mln"   de "1.234"
+# Treating either separator as a thousands mark is wrong somewhere, so the
+# rule is: with a short fractional part it is a decimal, otherwise thousands.
+_MULTIPLIERS = {
+    "k": 1_000, "tys": 1_000, "rb": 1_000,
+    "m": 1_000_000, "mln": 1_000_000, "mio": 1_000_000,
+    "b": 1_000_000_000, "mld": 1_000_000_000,
+}
+
+
+def parse_count(text: str) -> int:
+    """Parse a localised follower/post count like "1,2 mln" or "12.5K"."""
+    raw = (text or "").strip().lower()
+    m = re.match(r"([\d.,]+)\s*(k|m|b|mln|mio|tys|rb|mld)?", raw)
     if not m:
         return 0
+    num, unit = m.group(1), (m.group(2) or "")
+
+    # Normalise the number: both '.' and ',' may be thousands or decimal.
+    if "." in num and "," in num:
+        # whichever appears last is the decimal mark
+        if num.rfind(",") > num.rfind("."):
+            num = num.replace(".", "").replace(",", ".")
+        else:
+            num = num.replace(",", "")
+    elif "," in num:
+        int_part, _, frac = num.partition(",")
+        num = f"{int_part}.{frac}" if len(frac) in (1, 2) else num.replace(",", "")
+    elif "." in num:
+        int_part, _, frac = num.partition(".")
+        if len(frac) == 3 and int_part:   # 1.234 is thousands, 1.2 is decimal
+            num = num.replace(".", "")
+
     try:
-        v = float(m.group(1))
+        value = float(num)
     except ValueError:
         return 0
-    return int(v * _COUNT_SUFFIX.get(m.group(2) or "", 1))
+    return int(value * _MULTIPLIERS.get(unit, 1))
 
 
 # Instagram encodes what an image is in its CDN path:
@@ -428,10 +449,6 @@ def _is_media_url(url: str) -> bool:
     burning downloads on icons.
     """
     return any(h in url.lower() for h in _MEDIA_HINTS)
-
-
-def _is_avatar_url(url: str) -> bool:
-    return any(h in url.lower() for h in _AVATAR_HINTS)
 
 
 def profile_from_page(page) -> dict:

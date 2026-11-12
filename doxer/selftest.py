@@ -5,7 +5,6 @@ them to the doxer index as profiles, then runs face searches and verifies the
 correct profile ranks first with a high score while the other person scores lower.
 """
 
-import sys
 import time
 
 import requests

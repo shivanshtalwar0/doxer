@@ -3,8 +3,6 @@
 import base64
 import shutil
 import threading
-import time
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -98,53 +96,41 @@ class Pipeline:
         username: str = "",
         display_name: str = "",
         source_url: str = "",
-        set_avatar_if_missing: bool = True,
     ) -> int:
         """Persist one downloaded image and its already-detected faces.
 
-        Returns the new image row id. Kept separate from add_profile so a sweep
-        can score faces as it goes without re-detecting them.
+        Kept separate from add_profile so a sweep can score faces as it goes
+        without re-detecting them. Everything per-profile happens under
+        _store_lock: the filename index and the first-image avatar choice are
+        both read-then-write, and index workers run concurrently.
         """
-        prof = db.get_profile(pid)
-        if prof is None:
-            db.upsert_profile(pid, "instagram", username or pid, source_url or url, display_name)
-
-        # index images per profile under a lock: concurrent workers on the same
-        # profile would otherwise compute the same idx and overwrite each other
         with self._store_lock:
-            idx = len(db.list_images(pid))
+            prof = db.get_profile(pid)
+            if prof is None:
+                db.upsert_profile(pid, "instagram", username or pid,
+                                  source_url or url, display_name)
+                prof = db.get_profile(pid)
+
+            idx = db.count_images(pid)
             path = config.IMAGES_DIR / pid / f"{idx:03d}.jpg"
             path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 88])
             image_id = db.add_image(pid, url, str(path.relative_to(config.DATA)),
                                     bgr.shape[1], bgr.shape[0])
 
-        cur = db.get_profile(pid)
-        if set_avatar_if_missing and cur and not cur.get("avatar_path"):
-            db.set_avatar(pid, str(path.relative_to(config.DATA)))
+            if prof and not prof.get("avatar_path"):
+                db.set_avatar(pid, str(path.relative_to(config.DATA)))
 
-        for j, f in enumerate(faces):
-            thumb = config.IMAGES_DIR / pid / f"{idx:03d}_f{j}.jpg"
-            if f.thumb_bgr is not None and f.thumb_bgr.size:
-                cv2.imwrite(str(thumb), f.thumb_bgr)
-            db.add_face(
-                image_id, pid, f.bbox, f.det_score, f.embedding.tobytes(),
-                str(thumb.relative_to(config.DATA)) if f.thumb_bgr is not None else "",
-            )
+            for j, f in enumerate(faces):
+                thumb = config.IMAGES_DIR / pid / f"{idx:03d}_f{j}.jpg"
+                has_thumb = f.thumb_bgr is not None and f.thumb_bgr.size
+                if has_thumb:
+                    cv2.imwrite(str(thumb), f.thumb_bgr)
+                db.add_face(
+                    image_id, pid, f.bbox, f.det_score, f.embedding.tobytes(),
+                    str(thumb.relative_to(config.DATA)) if has_thumb else "",
+                )
         return image_id
-
-    def index_urls(self, pid: str, urls: list[str], name: str = "", source_url: str = "") -> tuple[int, int]:
-        """Download + detect + store a list of image URLs for one profile."""
-        n_img = n_faces = 0
-        for img_url in urls:
-            bgr, w, h = download_image(img_url)
-            if bgr is None:
-                continue
-            faces = self.engine.detect(bgr)
-            self.store_image(pid, img_url, bgr, faces, display_name=name, source_url=source_url)
-            n_img += 1
-            n_faces += len(faces)
-        return n_img, n_faces
 
     # ----------------------------------------------------------------- search
 

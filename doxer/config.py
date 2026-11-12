@@ -14,6 +14,8 @@ THUMB_SIZE = 320               # px for saved face crops
 MAX_IMAGE_BYTES = 9 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 25
 PAGE_TIMEOUT = 45_000
+BROWSER_START_TIMEOUT = 60      # seconds to wait for chromium to launch
+DB_BUSY_TIMEOUT = 30            # seconds sqlite waits for a write lock
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
@@ -32,6 +34,7 @@ INDEX_WORKERS = 4              # profiles indexed concurrently (I/O bound)
 INDEX_PREFETCH = 6             # images downloaded ahead of face detection
 IG_RATE = 1.2                  # sustained requests/sec across all workers
 IG_BURST = 3                   # allowed spike above that rate
+SWEEP_NETWORK_PHOTOS = 12      # photos indexed per related account
 SWEEP_NETWORK_MAX = 40         # related accounts followed per hit
 SWEEP_NETWORK_DEPTH = 1        # how many hops outward to follow related accounts
 
@@ -40,3 +43,12 @@ SCORE_STRONG = 0.60
 SCORE_POSSIBLE = 0.45
 SEARCH_MIN_SCORE = 0.35
 SEARCH_TOP_K = 12
+
+
+def band(score: float) -> str:
+    """Thresholds live here so the UI, CLI and sweep can never disagree."""
+    if score >= SCORE_STRONG:
+        return "strong"
+    if score >= SCORE_POSSIBLE:
+        return "possible"
+    return "weak"
