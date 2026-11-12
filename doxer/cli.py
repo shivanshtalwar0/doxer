@@ -35,6 +35,8 @@ def main() -> int:
     p_sweep.add_argument("--workers", type=int, default=3, help="parallel browsers for probing (default 3)")
     p_sweep.add_argument("--limit", type=int, default=None, help="cap the number of candidates probed")
     p_sweep.add_argument("--query", default=None, help="query photo to rank against (default data/query.jpg)")
+    p_sweep.add_argument("--network", action="store_true",
+                         help="also crawl accounts suggested on each hit (slower, more requests; off by default)")
     p_sweep.add_argument("--dry-run", action="store_true", help="only print the generated candidates")
     p_sweep.add_argument("--json", action="store_true")
 
@@ -144,7 +146,8 @@ def main() -> int:
             platforms,
             limit=args.limit,
             max_photos=args.full_images,
-            follow_network=False,
+            follow_network=args.network,
+            network_max=config.SWEEP_NETWORK_MAX,
             workers=args.workers,
         )
 

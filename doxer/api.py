@@ -54,7 +54,7 @@ class SweepBody(BaseModel):
     platforms: list[str] = ["instagram", "threads", "facebook"]
     limit: int | None = None
     max_photos: int = 40
-    follow_network: bool = True
+    follow_network: bool = False
     network_max: int = 40
     query_image: str | None = None
     workers: int = 4

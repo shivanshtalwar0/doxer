@@ -372,6 +372,25 @@ def _combined_rank():
                 f"{config.band(face)} -> {config.band(got)}")
 
 
+@check("network search is opt-in at every layer")
+def _network_default_off():
+    import inspect
+
+    from doxer.api import SweepBody
+    from doxer.sweep import SweepRunner
+
+    assert SweepBody(name="x").follow_network is False, "API must default to off"
+    assert inspect.signature(SweepRunner.run).parameters["follow_network"].default is False, \
+        "SweepRunner must default to off"
+
+    src = inspect.getsource(SweepRunner._run)
+    assert "network search off" in src, "a skipped network pass must be logged, not silent"
+
+    html = open("doxer/static/index.html").read()
+    assert "follow_network: true" not in html, "UI must not hardcode the network crawl on"
+    assert 'id="nownetwork"' in html, "UI needs a toggle"
+
+
 @check("only one sweep implementation remains")
 def _single_sweep_engine():
     from doxer.pipeline import Pipeline

@@ -142,7 +142,7 @@ class SweepRunner:
         *,
         limit: int | None = None,
         max_photos: int = config.SWEEP_MAX_PHOTOS,
-        follow_network: bool = True,
+        follow_network: bool = False,
         network_max: int = config.SWEEP_NETWORK_MAX,
         workers: int = config.SWEEP_WORKERS,
         index_workers: int = config.INDEX_WORKERS,
@@ -234,12 +234,18 @@ class SweepRunner:
         n_faces = sum(x["n_faces"] for x in indexed)
         self._set(n_profiles=n_prof, n_images=n_img, n_faces=n_faces)
 
-        # ---- 3. follow the network
+        # ---- 3. follow the network (opt-in)
+        if not follow_network and not self.cancelled:
+            self._act("network search off — skipping related accounts", "network", "ok", 85)
         if follow_network and not self.cancelled:
             self._set("networking", "following related accounts")
-            self._act("looking for related accounts", "network", "run", 85)
+            self._act(f"searching the network for accounts related to {len(indexed)} profile(s)",
+                      "network", "run", 85)
             append = self._related_usernames(indexed)[:network_max]
-            self._act(f"{len(append)} related accounts found", "network", "ok", 86)
+            if not append:
+                self._act("network search found no additional accounts", "network", "ok", 86)
+            else:
+                self._act(f"{len(append)} related account(s) to index", "network", "ok", 86)
             for j, u in enumerate(append, 1):
                 if self.cancelled:
                     break
@@ -480,12 +486,17 @@ class SweepRunner:
             if self.cancelled:
                 break
             try:
-                for u in related_accounts(prof["username"]):
-                    ul = u.lower()
-                    if f"instagram:{ul}" not in self._seen and ul not in out:
-                        out.append(ul)
-            except Exception:  # noqa: BLE001
+                found = related_accounts(prof["username"])
+            except Exception as e:  # noqa: BLE001
+                self._act(f"related @{prof['username']} failed: {type(e).__name__}",
+                          "network", "warn")
                 continue
+            if found:
+                self._act(f"@{prof['username']} suggests {len(found)} account(s)", "network", "ok")
+            for u in found:
+                ul = u.lower()
+                if f"instagram:{ul}" not in self._seen and ul not in out:
+                    out.append(ul)
         return out
 
     def _finalize(self) -> float:
