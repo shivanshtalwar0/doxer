@@ -327,6 +327,58 @@ def _pool_fails_fast():
     raise AssertionError("closed pool should raise ScrapeError, not block")
 
 
+# ------------------------------------------- thread safety, ranking, dedupe
+
+
+@check("each thread gets its own browser")
+def _per_thread_browser():
+    import threading
+
+    from doxer.scraper import close_all_browsers, get_pool
+
+    ids: dict[int, int] = {}
+
+    def grab(i: int) -> None:
+        ids[i] = id(get_pool())
+
+    threads = [threading.Thread(target=grab, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    try:
+        assert len(set(ids.values())) == 3, f"threads shared a browser: {ids}"
+        assert get_pool() is get_pool(), "same thread should reuse its browser"
+    finally:
+        close_all_browsers()
+
+
+@check("attribute evidence reorders but never changes the band")
+def _combined_rank():
+    from doxer import config
+    from doxer.sweep import combined_rank
+
+    assert combined_rank(0.50, 0.0) == 0.50, "no evidence should not change the score"
+    assert combined_rank(0.50, 1.0) > 0.50, "evidence should lift a plausible face match"
+    assert combined_rank(0.10, 1.0) == 0.10, "a weak face must not be rescued by bio text"
+    assert combined_rank(0.0, 1.0) == 0.0, "no face score means no match"
+    # The invariant that matters: bio text is weak evidence, so it must never
+    # promote a profile into a higher confidence band.
+    for face in (0.10, 0.44, 0.46, 0.50, 0.55, 0.59, 0.599, 0.70):
+        for attrs in (0.25, 0.5, 1.0):
+            got = combined_rank(face, attrs)
+            assert config.band(got) == config.band(face), (
+                f"face {face} + attrs {attrs} -> {got} changed band "
+                f"{config.band(face)} -> {config.band(got)}")
+
+
+@check("only one sweep implementation remains")
+def _single_sweep_engine():
+    from doxer.pipeline import Pipeline
+
+    assert not hasattr(Pipeline, "sweep"), "Pipeline.sweep duplicates SweepRunner"
+
+
 # --------------------------------------------------------------------- main
 
 

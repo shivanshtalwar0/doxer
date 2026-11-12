@@ -7,12 +7,14 @@ changes markup often and may serve login walls; direct image URLs always work.
 """
 
 import concurrent.futures
+import contextlib
 import io
 import os
 import queue
 import random
 import re
 import threading
+import weakref
 
 os.environ.setdefault(
     "PLAYWRIGHT_BROWSERS_PATH", str(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".browsers"))
@@ -102,16 +104,65 @@ class BrowserPool:
             pass
 
 
-_pool: BrowserPool | None = None
-_pool_lock = threading.Lock()
+# One browser per THREAD, not one per process.
+#
+# Playwright's sync API binds its objects to the thread that created them, and
+# the sync driver refuses to be entered from two threads at once. A single
+# process-wide pool meant every caller thread -- uvicorn's request pool and each
+# sweep index worker -- shared one driver, which is exactly the race that
+# produced "net::ERR_ABORTED" during earlier parallel testing.
+#
+# A per-thread browser gives each worker a driver of its own. Browsers are
+# closed by close_thread_browser(); the registry holds weak references so a
+# finished thread's entry disappears instead of pinning a dead Chromium.
+_local = threading.local()
+_registry: "weakref.WeakValueDictionary[int, BrowserPool]" = weakref.WeakValueDictionary()
+_registry_lock = threading.Lock()
 
 
 def get_pool() -> BrowserPool:
-    global _pool
-    with _pool_lock:
-        if _pool is None:
-            _pool = BrowserPool()
-        return _pool
+    """The calling thread's browser, created on first use."""
+    pool = getattr(_local, "pool", None)
+    if pool is not None:
+        return pool
+    pool = BrowserPool()
+    _local.pool = pool
+    with _registry_lock:
+        _registry[threading.get_ident()] = pool
+    return pool
+
+
+def close_thread_browser() -> None:
+    """Close and forget this thread's browser. Safe to call twice."""
+    pool = getattr(_local, "pool", None)
+    if pool is None:
+        return
+    _local.pool = None
+    with _registry_lock:
+        _registry.pop(threading.get_ident(), None)
+    pool.close()
+
+
+def close_all_browsers() -> None:
+    """Close every live browser this process created (used at shutdown)."""
+    with _registry_lock:
+        pools = list(_registry.values())
+        _registry.clear()
+    for pool in pools:
+        pool.close()
+
+
+@contextlib.contextmanager
+def browser_scope() -> "Iterator[BrowserPool]":
+    """Borrow this thread's browser and close it on the way out.
+
+    Long-lived workers (sweep index threads, probe workers) should wrap their
+    whole run in this so Chromium is not left running after the work ends.
+    """
+    try:
+        yield get_pool()
+    finally:
+        close_thread_browser()
 
 
 # ------------------------------------------------------------------- scraping
@@ -309,8 +360,6 @@ def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=N
     errors: list[BaseException] = []
 
     def worker(chunk: list[tuple[str, str]]) -> None:
-        pool = BrowserPool()
-
         def on_each(rec: dict) -> None:
             # report per handle, not per finished chunk, so the UI updates live
             with lock:
@@ -321,13 +370,12 @@ def probe_usernames(targets: list[tuple[str, str]], workers: int = 3, progress=N
                 progress(n, len(targets), [rec])
 
         try:
-            pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60, on_each=on_each,
-                      stop=lambda: bool(errors))
+            with browser_scope() as pool:
+                pool.call(_probe_batch, chunk, timeout=120 * len(chunk) + 60, on_each=on_each,
+                          stop=lambda: bool(errors))
         except BaseException as e:  # noqa: BLE001
             with lock:
                 errors.append(e)
-        finally:
-            pool.close()
 
     threads = [threading.Thread(target=worker, args=(c,), daemon=True) for c in chunks if c]
     for t in threads:

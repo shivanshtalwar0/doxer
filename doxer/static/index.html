@@ -831,7 +831,10 @@ async function loadResults() {
   if (!SID) return;
   let s;
   try { s = await api(`/api/sessions/${SID}`); } catch (e) { return; }
-  const rows = (s.profiles || []).slice().sort((a, b) => b.best_score - a.best_score);
+  // rank_score blends face similarity with attribute evidence; fall back to
+  // the raw face score for rows written before ranking existed
+  const rows = (s.profiles || []).slice().sort(
+    (a, b) => (b.rank_score || b.best_score) - (a.rank_score || a.best_score));
   $('#nowwrap').classList.remove('scanning');
   $('#nresults').textContent = rows.length ? `— ${rows.length} profiles examined` : '';
   if (!rows.length) {
@@ -845,7 +848,10 @@ async function loadResults() {
     return `<tr>
       <td>${av ? `<img src="${av}" alt="">` : '<div style="width:34px;height:34px;background:var(--panel2);border-radius:6px"></div>'}</td>
       <td><b>@${esc(p.username)}</b><div style="color:var(--dim);font-size:11.5px">${esc(p.full_name || '')}${p.followers ? ' · ' + p.followers.toLocaleString() + ' followers' : ''}</div>${p.bio ? `<div style="color:var(--dim);font-size:11px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.bio)}</div>` : ''}</td>
-      <td class="scorecell ${bcls(p.best_score)}">${pct(p.best_score)}%</td>
+      <td class="scorecell ${bcls(p.best_score)}">${pct(p.best_score)}%${
+        (p.rank_score && p.rank_score > p.best_score + 0.001)
+          ? `<span class="tag" title="face + attribute evidence">▲${Math.round((p.rank_score - p.best_score) * 100)}</span>` : ''
+      }</td>
       <td style="color:var(--dim)">${p.n_faces}</td>
       <td>${attrs ? `<span class="tag">${esc(attrs)}</span>` : ''}</td>
       <td><a href="${esc(p.source_url)}" target="_blank" rel="noopener">open ↗</a></td>

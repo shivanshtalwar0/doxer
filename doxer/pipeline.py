@@ -211,48 +211,6 @@ class Pipeline:
 
     # ------------------------------------------------------------------ sweep
 
-    def sweep(
-        self,
-        candidates: list[str],
-        *,
-        platforms: tuple[str, ...] = ("instagram", "threads"),
-        full_images: int = 2,
-        workers: int = 3,
-        on_progress=None,
-        stop_on_strong: bool = True,
-    ) -> dict:
-        """Probe candidate usernames, index every hit, then rank everything.
-
-        Returns {probed, found, indexed, errors, best:[...], strong:bool}.
-        """
-        from .scraper import probe_usernames
-
-        targets = [(p, c) for p in platforms for c in candidates]
-        probed = probe_usernames(targets, workers=workers, progress=on_progress)
-        hits = [r for r in probed if r.get("exists")]
-
-        indexed: list[str] = []
-        errors: list[dict] = []
-        for r in hits:
-            try:
-                p = self.add_profile(r["url"], full_images=full_images)
-                indexed.append(p.get("id", ""))
-                if on_progress:
-                    on_progress(0, 0, [dict(r, indexed=p.get("id") or "")])
-            except Exception as e:  # noqa: BLE001
-                errors.append({"url": r["url"], "error": f"{type(e).__name__}: {e}"})
-
-        best = self.rank_all()
-        strong = any(m["score"] >= config.SCORE_STRONG for m in best)
-        return {
-            "probed": len(probed),
-            "found": hits,
-            "indexed": indexed,
-            "errors": errors,
-            "best": best,
-            "strong": strong,
-        }
-
     def rank_all(self, query_path: str | None = None) -> list[dict]:
         """Best face score per profile against a query, with no score floor.
 

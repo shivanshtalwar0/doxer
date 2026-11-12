@@ -117,6 +117,8 @@ def init() -> None:
                 n_images INTEGER DEFAULT 0,
                 n_faces INTEGER DEFAULT 0,
                 best_score REAL DEFAULT 0,
+                attr_score REAL DEFAULT 0,
+                rank_score REAL DEFAULT 0,
                 status TEXT DEFAULT 'indexed',    -- found|indexed|no-faces|error
                 avatar_path TEXT DEFAULT '',
                 source_url TEXT DEFAULT '',
@@ -194,7 +196,8 @@ def _migrate(c) -> None:
     wanted = {
         "session_checks": [("stage", "TEXT DEFAULT 'done'")],
         "sessions": [],
-        "session_profiles": [],
+        "session_profiles": [("attr_score", "REAL DEFAULT 0"),
+                             ("rank_score", "REAL DEFAULT 0")],
     }
     for table, cols in wanted.items():
         try:
@@ -391,6 +394,8 @@ def add_session_profile(
     n_images: int = 0,
     n_faces: int = 0,
     best_score: float = 0.0,
+    attr_score: float = 0.0,
+    rank_score: float = 0.0,
     status: str = "indexed",
     avatar_path: str = "",
     source_url: str = "",
@@ -401,24 +406,27 @@ def add_session_profile(
         c.execute(
             """INSERT INTO session_profiles
                (session_id,profile_id,platform,username,full_name,bio,city,education,followers,
-                n_images,n_faces,best_score,status,avatar_path,source_url,discovered_via,raw,added_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                n_images,n_faces,best_score,attr_score,rank_score,status,avatar_path,source_url,
+                discovered_via,raw,added_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(session_id,profile_id) DO UPDATE SET
                  n_images=excluded.n_images, n_faces=excluded.n_faces, best_score=excluded.best_score,
+                 attr_score=excluded.attr_score, rank_score=excluded.rank_score,
                  status=excluded.status, bio=excluded.bio, full_name=excluded.full_name,
                  followers=excluded.followers""",
             (
                 session_id, profile_id, platform, username, full_name, bio, city, education,
-                followers, n_images, n_faces, best_score, status, avatar_path, source_url,
-                discovered_via, json.dumps(raw or {}), time.time(),
+                followers, n_images, n_faces, best_score, attr_score, rank_score, status,
+                avatar_path, source_url, discovered_via, json.dumps(raw or {}), time.time(),
             ),
         )
 
 
-def list_session_profiles(sid: str, order: str = "best_score DESC") -> list[dict]:
-    allowed_orders = {"best_score DESC", "best_score ASC", "added_at DESC", "n_faces DESC", "username ASC"}
+def list_session_profiles(sid: str, order: str = "rank_score DESC") -> list[dict]:
+    allowed_orders = {"rank_score DESC", "best_score DESC", "best_score ASC",
+                      "added_at DESC", "n_faces DESC", "username ASC"}
     if order not in allowed_orders:
-        order = "best_score DESC"
+        order = "rank_score DESC"
     with _lock, _conn() as c:
         rows = c.execute(f"SELECT * FROM session_profiles WHERE session_id=? ORDER BY {order}", (sid,)).fetchall()
     return [dict(r) for r in rows]

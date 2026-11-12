@@ -123,41 +123,54 @@ def main() -> int:
             print(f"-- {len(cands)} candidates", file=sys.stderr)
             return 0
 
-        platforms = tuple(args.platforms) if args.platforms else ("instagram", "threads")
+        platforms = list(args.platforms) if args.platforms else ["instagram", "threads"]
         print(f"probing {len(cands)} candidates on {', '.join(platforms)}…", file=sys.stderr)
 
-        def progress(done: int, total: int, batch: list) -> None:
-            for r in batch:
-                if r.get("exists"):
-                    extra = f" -> indexed {r['indexed']}" if r.get("indexed") else ""
-                    print(f"  FOUND {r['platform']:<10} @{r['username']}{extra}", file=sys.stderr)
-            if total:
-                print(f"  …{done}/{total} probed", file=sys.stderr)
+        # The CLI used to drive a second, older sweep engine on Pipeline. This
+        # routes through SweepRunner instead: one implementation, with the
+        # authenticated prober, sessions and cancellation all intact.
+        from .sweep import SweepRunner
 
-        result = pipe.sweep(
-            cands,
-            platforms=platforms,
-            full_images=args.full_images,
+        qimg = args.query or str(config.DATA / "query.jpg")
+        sid = db.create_session(args.name, {}, qimg, platforms)
+        runner = SweepRunner(sid, qimg, {}, pipe=pipe)
+
+        def on_act(label: str, state: str) -> None:
+            if state != "run":
+                print(f"  {label}", file=sys.stderr)
+
+        result = runner.run(
+            args.name,
+            platforms,
+            limit=args.limit,
+            max_photos=args.full_images,
+            follow_network=False,
             workers=args.workers,
-            on_progress=progress,
         )
-        best = pipe.rank_all(args.query) if any(m for m in result["best"]) else result["best"]
 
+        session = db.get_session(sid) or {}
         if args.json:
-            print(json.dumps({"result": result, "ranking": best}, indent=2, default=str))
+            print(json.dumps({"session": session,
+                              "profiles": db.list_session_profiles(sid)}, indent=2, default=str))
             return 0
 
-        print(f"\nprobed {result['probed']}  found {len(result['found'])}  indexed {len(result['indexed'])}")
-        for e in result["errors"]:
-            print(f"  index error {e['url']}: {e['error']}", file=sys.stderr)
-        if not best:
+        print(f"\nsession {sid}: {session.get('message', '')}")
+        print(f"  {session.get('n_profiles', 0)} profiles · {session.get('n_images', 0)} images · "
+              f"{session.get('n_faces', 0)} faces")
+        rows = db.list_session_profiles(sid)
+        if not rows:
             print("nothing indexed with a detectable face")
             return 0
-        print("\nbest score per profile (no floor):")
-        for m in best:
-            print(f"  {m['band'].upper():<9} {m['score']:.3f}  @{m['username']:<26} {m['platform']:<10} {m['face_thumb']}")
-        if not result["strong"]:
-            print(f"\nnothing reached STRONG (>={config.SCORE_STRONG:.2f}) — treat all of the above as non-matches.")
+        print("\nranked by face + attributes:")
+        for m in rows:
+            band = config.band(m["rank_score"] or m["best_score"])
+            lift = ""
+            if m.get("rank_score", 0) > m["best_score"] + 0.001:
+                lift = f"  (attrs +{m['rank_score'] - m['best_score']:.2f})"
+            print(f"  {band.upper():<9} {m['best_score']:.3f}  @{m['username']:<24} "
+                  f"{m['platform']:<10}{lift}")
+        return 0
+
         return 0
 
     if args.cmd == "list":

@@ -18,7 +18,7 @@ import time
 from urllib.parse import quote
 
 from . import config, db
-from .scraper import BrowserPool, ScrapeError
+from .scraper import BrowserPool, ScrapeError, browser_scope
 from .throttle import Throttle
 
 IG = "https://www.instagram.com"
@@ -627,16 +627,13 @@ def ensure_login(progress=None) -> list[dict]:
     if acct.get("status") == "ok" and cookies:
         return cookies
 
-    pool = BrowserPool()
-    try:
+    with browser_scope() as pool:
         ok, msg, cookies = pool.call(login, acct["username"], acct.get("password") or "", timeout=180)
         if ok:
             db.upsert_account("instagram", acct["username"], "", json.dumps(cookies), "ok", "")
             return cookies
         db.upsert_account("instagram", acct["username"], "", json.dumps(cookies), "failed", msg)
         raise LoginRequired(msg)
-    finally:
-        pool.close()
 
 
 def probe_authed(usernames: list[str], workers: int = 3, progress=None, on_result=None,
@@ -664,25 +661,22 @@ def probe_authed(usernames: list[str], workers: int = 3, progress=None, on_resul
     errors: list[BaseException] = []
 
     def run(chunk):
-        pool = BrowserPool()
+        # Remember failures: a callback raising (e.g. cancellation) must not be
+        # swallowed by the worker thread, or the caller waits for every chunk.
         try:
-            batch = pool.call(
-                _probe_authed, chunk, cookies,
-                timeout=120 * len(chunk) + 90,
-                progress=_emit_wrapper(progress, on_result, lock, done, total),
-                throttle=throttle,
-                stop=lambda: bool(errors),
-            )
+            with browser_scope() as pool:
+                batch = pool.call(
+                    _probe_authed, chunk, cookies,
+                    timeout=120 * len(chunk) + 90,
+                    progress=_emit_wrapper(progress, on_result, lock, done, total),
+                    throttle=throttle,
+                    stop=lambda: bool(errors),
+                )
             with lock:
                 results.extend(batch)
         except BaseException as e:  # noqa: BLE001
-            # remember it: a callback raising (e.g. cancellation) must not be
-            # swallowed by the worker thread, or the caller hangs until every
-            # chunk finishes on its own.
             with lock:
                 errors.append(e)
-        finally:
-            pool.close()
 
     threads = [threading.Thread(target=run, args=(c,), daemon=True) for c in chunks if c]
     for t in threads:
@@ -711,21 +705,15 @@ def _emit_wrapper(progress, on_result, lock, done, total):
 def scrape_authed(username: str) -> dict:
     """Fetch a profile's metadata + image URLs while logged in."""
     cookies = ensure_login()
-    pool = BrowserPool()
-    try:
+    with browser_scope() as pool:
         return pool.call(_scrape_authed, username, cookies, timeout=180)
-    finally:
-        pool.close()
 
 
 def related_accounts(username: str, limit: int = 20) -> list[str]:
     """Usernames Instagram suggests on a profile ("similar accounts")."""
     cookies = ensure_login()
-    pool = BrowserPool()
-    try:
+    with browser_scope() as pool:
         return pool.call(_related, username, cookies, limit, timeout=120)
-    finally:
-        pool.close()
 
 
 def _related(browser, username: str, cookies: list[dict], limit: int) -> list[str]:

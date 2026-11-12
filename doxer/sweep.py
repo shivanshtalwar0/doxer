@@ -30,7 +30,12 @@ def _norm(s: str) -> str:
 
 
 def attribute_score(attrs: dict, *, full_name: str = "", bio: str = "", username: str = "") -> tuple[float, list[str]]:
-    """How well a profile matches the supplied attributes. Returns (0..1, matched keys)."""
+    """How well a profile matches the supplied attributes.
+
+    Returns (0..1, matched keys). The denominator counts only attributes the
+    caller actually supplied, so a 3-attribute query and a 1-attribute query are
+    both scored out of what was asked for.
+    """
     haystacks = [_norm(full_name), _norm(bio), _norm(username)]
     hits: list[str] = []
     checks = 0
@@ -44,6 +49,42 @@ def attribute_score(attrs: dict, *, full_name: str = "", bio: str = "", username
     if not checks:
         return 0.0, hits
     return len(hits) / checks, hits
+
+
+# How much attribute evidence can lift a candidate.
+#
+# Bio text is weak evidence: anyone can write "Muzaffarnagar". So it may only
+# reorder profiles that are already plausible on the face -- it must never move
+# a profile into a higher band. 0.59 is still "possible"; a 0.05 flat bonus
+# would push it to "strong" on the strength of a word in a bio. The lift is
+# therefore capped by the actual headroom to the next boundary.
+ATTR_BONUS_MIN_FACE = config.SCORE_POSSIBLE
+ATTR_BONUS_FRACTION = 0.10        # up to 10% of the room before the next band
+
+
+def _next_boundary(score: float) -> float | None:
+    """The band threshold above `score`, or None if already at the top band."""
+    if score < config.SCORE_POSSIBLE:
+        return config.SCORE_POSSIBLE
+    if score < config.SCORE_STRONG:
+        return config.SCORE_STRONG
+    return None
+
+
+def combined_rank(face_score: float, attr_score: float) -> float:
+    """Blend face similarity with attribute evidence for ordering results.
+
+    Bounded so that attributes can only reorder within a band, never promote a
+    profile across one: ordering evidence must not change the verdict.
+    """
+    if face_score < ATTR_BONUS_MIN_FACE or attr_score <= 0.0:
+        return face_score
+    boundary = _next_boundary(face_score)
+    if boundary is None:
+        return face_score                     # already STRONG: nothing to add
+    headroom = boundary - face_score
+    return face_score + min(headroom * ATTR_BONUS_FRACTION * attr_score,
+                            headroom * 0.5)
 
 
 def _thumb_b64(bgr) -> str:
@@ -165,9 +206,12 @@ class SweepRunner:
             with lock:
                 indexed.append(prof)
             best = self._best_by_profile.get(prof["pid"], 0.0)
+            lift = ""
+            if prof.get("attr_score"):
+                lift = f", attrs {prof['attr_score']:.2f}"
             self._act(
                 f"{platform} @{uname}: {prof['n_images']} photos, {prof['n_faces']} faces, "
-                f"best {best:.3f}  [{started}/{total}]",
+                f"best {best:.3f}{lift}  [{started}/{total}]",
                 "profile", "ok", pct,
             )
             with lock:
@@ -414,6 +458,8 @@ class SweepRunner:
             followers=int(info.get("followers") or 0),
             n_images=n_img, n_faces=n_faces,
             best_score=profile_best,
+            attr_score=a_score,
+            rank_score=combined_rank(profile_best, a_score),
             status="indexed" if n_faces else "no-faces",
             avatar_path=(db.get_profile(pid) or {}).get("avatar_path", ""),
             source_url=(f"https://www.instagram.com/{uname}/" if platform == "instagram"
@@ -422,7 +468,8 @@ class SweepRunner:
             raw={"attribute_score": a_score, "attribute_hits": a_hits},
         )
         return {"pid": pid, "username": uname, "platform": platform,
-                "n_images": n_img, "n_faces": n_faces, "attr_score": a_score}
+                "n_images": n_img, "n_faces": n_faces, "attr_score": a_score,
+                "rank_score": combined_rank(profile_best, a_score)}
 
     def _related_usernames(self, indexed: list[dict]) -> list[str]:
         """Accounts suggested on the profiles we already have ('similar accounts')."""
