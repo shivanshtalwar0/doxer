@@ -184,6 +184,26 @@
   .instrow .kw { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--panel2); color: var(--dim); flex: none; }
   .instrow.nosite .site { color: var(--low); }
 
+  /* scored-image evidence grid */
+  .imgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .imgcell {
+    position: relative; border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
+    background: #0a0c0f; cursor: pointer;
+  }
+  .imgcell img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .imgcell .sc {
+    position: absolute; top: 6px; right: 6px; font-size: 11px; font-weight: 700;
+    padding: 2px 7px; border-radius: 99px; background: rgba(0,0,0,.72); color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  .imgcell .cap {
+    padding: 6px 7px; font-size: 11px; color: var(--dim); line-height: 1.35;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .imgcell.hi { border-color: var(--good); box-shadow: 0 0 0 1px var(--good) inset; }
+  .imgcell.mid { border-color: var(--mid); }
+  .imgcell:hover { filter: brightness(1.15); }
+
   /* session log */
   .log { max-height: 230px; overflow-y: auto; font-size: 12px; }
   .log .row2 { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid rgba(38,43,51,.55); }
@@ -495,12 +515,18 @@
         </div>
 
         <div class="card" style="margin-top:16px">
-          <h2>High-confidence matches <span id="inresults" style="text-transform:none;letter-spacing:0"></span></h2>
-          <div class="tablewrap">
-            <table class="rtable">
-              <thead><tr><th></th><th>Institution</th><th>Score</th><th>Faces</th><th>Source</th></tr></thead>
-              <tbody id="irtbody"><tr><td colspan="5" class="empty">no run yet</td></tr></tbody>
-            </table>
+          <h2>Matched images <span id="inresults" style="text-transform:none;letter-spacing:0"></span></h2>
+          <div class="row" style="margin-bottom:10px">
+            <div class="chips" id="iscorefilter">
+              <button class="chip on" data-min="0">all scored</button>
+              <button class="chip" data-min="0.3">30%+</button>
+              <button class="chip" data-min="0.45">45%+</button>
+              <button class="chip" data-min="0.55">55%+ (strong)</button>
+            </div>
+          </div>
+          <div id="iimgrid" class="imgrid"><div class="empty">no run yet</div></div>
+          <div class="row" style="margin-top:10px;justify-content:center">
+            <button class="ghost" id="imores" onclick="instLoadImages(true)" style="display:none">load more</button>
           </div>
         </div>
       </div>
@@ -1167,7 +1193,8 @@ async function instStart() {
   $('#irun').disabled = true; $('#ifind').disabled = true;
   $('#irecdot').style.display = 'inline-block';
   $('#iactfeed').innerHTML = ''; $('#istrip').innerHTML = '';
-  $('#irtbody').innerHTML = '<tr><td colspan="5" class="empty">crawling…</td></tr>';
+  $('#iimgrid').innerHTML = '<div class="empty">crawling… results appear as photos are scored</div>';
+  $('#imores').style.display = 'none';
   $('#inowimg').style.display = 'none'; $('#inowmeta').style.display = 'none';
   $('#inowidle').style.display = 'block';
   $('#inowidle').textContent = 'uploading photo…';
@@ -1261,31 +1288,68 @@ async function iPoll() {
   }
 }
 
+let IIMG_OFFSET = 0, IIMG_TOTAL = 0;
+
+function instMinScore() {
+  const el = document.querySelector('#iscorefilter .chip.on');
+  return el ? parseFloat(el.dataset.min) : 0;
+}
+document.querySelectorAll('#iscorefilter .chip').forEach(c => c.onclick = () => {
+  document.querySelectorAll('#iscorefilter .chip').forEach(x => x.classList.remove('on'));
+  c.classList.add('on');
+  instLoadImages(false);
+});
+
+function scoreClass(v) {
+  return v >= 0.6 ? 'hi' : (v >= 0.45 ? 'mid' : '');
+}
+
+// Scored images ARE the result: a school's headline score hides which photo
+// actually matched, so show the photos themselves, best first.
+async function instLoadImages(more) {
+  if (!ISID) return;
+  if (!more) { IIMG_OFFSET = 0; $('#iimgrid').innerHTML = ''; }
+  const minScore = instMinScore();
+  try {
+    const r = await api(`/api/sessions/${ISID}/images?min_score=${minScore}`
+                        + `&limit=60&offset=${IIMG_OFFSET}`);
+    IIMG_TOTAL = r.total;
+    const grid = $('#iimgrid');
+    if (!more && !r.images.length) {
+      grid.innerHTML = `<div class="empty">no scored images${minScore ? ' above ' + Math.round(minScore * 100) + '%' : ''}</div>`;
+    }
+    for (const im of r.images) {
+      const cell = document.createElement('div');
+      cell.className = 'imgcell ' + scoreClass(im.best_score);
+      const pctv = Math.round(im.best_score * 100);
+      cell.title = `${im.institution || im.profile_id} — ${pctv}%\n${im.image_path}`;
+      cell.innerHTML = `
+        <img src="data:image/jpeg;base64,${im.thumb_b64 || ''}" alt="" loading="lazy">
+        <span class="sc">${pctv}%</span>
+        <div class="cap">${esc(im.institution || im.profile_id)} · ${im.n_faces} face${im.n_faces === 1 ? '' : 's'}</div>`;
+      cell.onclick = () => window.open(im.image_path, '_blank');
+      grid.appendChild(cell);
+    }
+    IIMG_OFFSET += r.images.length;
+    $('#inresults').textContent = `— ${IIMG_TOTAL} image(s) scored`;
+    $('#imores').style.display = IIMG_OFFSET < IIMG_TOTAL ? 'inline-block' : 'none';
+  } catch (e) {
+    $('#iimgrid').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
 async function iLoadResults() {
   if (!ISID) return;
+  await instLoadImages(false);
   let s;
   try { s = await api(`/api/sessions/${ISID}`); } catch (e) { return; }
-  const rows = (s.profiles || []).slice().sort((a, b) => b.best_score - a.best_score);
-  const hits = rows.filter(r => (r.best_score || 0) >= 0.55);
-  $('#inresults').textContent = `— ${hits.length} of ${rows.length} institutions`;
-  if (!rows.length) {
-    $('#irtbody').innerHTML = '<tr><td colspan="5" class="empty">no institutions crawled</td></tr>';
-    return;
+  const rows = s.profiles || [];
+  const strong = rows.filter(r => (r.best_score || 0) >= 0.55).length;
+  if (rows.length) {
+    $('#inresults').textContent =
+      `— ${IIMG_TOTAL} image(s) scored across ${rows.length} institution(s)`
+      + (strong ? `, ${strong} above 55%` : '');
   }
-  const show = hits.length ? hits : rows.slice(0, 25);
-  $('#irtbody').innerHTML = show.map(p => {
-    let raw = {};
-    try { raw = JSON.parse(p.raw || '{}'); } catch (e) {}
-    const href = raw.website || p.source_url || '#';
-    return `<tr>
-      <td>${'<div style="width:34px;height:34px;background:var(--panel2);border-radius:6px"></div>'}</td>
-      <td><b>${esc(p.full_name || p.username)}</b>
-          <div style="color:var(--dim);font-size:11px">${esc(raw.kind || '')} · ${esc(p.bio || '')}</div></td>
-      <td class="scorecell ${bcls(p.best_score)}">${pct(p.best_score)}%</td>
-      <td style="color:var(--dim)">${p.n_faces}</td>
-      <td><a href="${esc(href)}" target="_blank" rel="noopener">site ↗</a></td>
-    </tr>`;
-  }).join('');
 }
 
 async function iReattach() {

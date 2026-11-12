@@ -488,6 +488,36 @@ def delete_session(sid: str) -> None:
         c.execute("DELETE FROM sessions WHERE id=?", (sid,))
 
 
+def top_session_images(sid: str, min_score: float = 0.0, limit: int = 120,
+                       offset: int = 0) -> tuple[list[dict], int]:
+    """Scored images for a session, best first, with the institution name.
+
+    Institution mode needs the images themselves as results: a school's final
+    score hides which photo actually matched. The face thumbs are stripped
+    (they are large base64 blobs); the caller already has image thumbs.
+    """
+    with _lock, _conn() as c:
+        total = c.execute(
+            "SELECT COUNT(*) FROM session_checks WHERE session_id=? AND best_score>=?",
+            (sid, min_score),
+        ).fetchone()[0]
+        rows = c.execute(
+            """SELECT k.id, k.profile_id, k.image_path, k.thumb_b64, k.n_faces,
+                      k.best_score, k.matched,
+                      COALESCE(p.full_name, '') AS institution,
+                      COALESCE(p.bio, '') AS address,
+                      COALESCE(p.source_url, '') AS source_url
+               FROM session_checks k
+               LEFT JOIN session_profiles p
+                 ON p.session_id = k.session_id AND p.profile_id = k.profile_id
+               WHERE k.session_id=? AND k.best_score>=?
+               ORDER BY k.best_score DESC, k.id DESC
+               LIMIT ? OFFSET ?""",
+            (sid, min_score, limit, offset),
+        ).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
 def list_session_checks(sid: str, after_id: int = 0, limit: int = 200) -> list[dict]:
     with _lock, _conn() as c:
         rows = c.execute(

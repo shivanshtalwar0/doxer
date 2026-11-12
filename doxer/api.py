@@ -365,6 +365,21 @@ def create_app(pipeline) -> FastAPI:
         s["profiles"] = db.list_session_profiles(sid)
         return s
 
+    @app.get("/api/sessions/{sid}/images")
+    def session_images(
+        sid: str,
+        min_score: float = Query(0.0, ge=0.0, le=1.0),
+        limit: int = Query(120, ge=1, le=300),
+        offset: int = Query(0, ge=0),
+    ):
+        """Scored images, best first -- the evidence behind each institution."""
+        s = db.get_session(sid)
+        if not s:
+            raise HTTPException(404, "no such session")
+        rows, total = db.top_session_images(sid, min_score=min_score,
+                                            limit=limit, offset=offset)
+        return {"total": total, "offset": offset, "images": rows}
+
     @app.get("/api/sessions/{sid}/checks")
     def session_checks(
         sid: str,

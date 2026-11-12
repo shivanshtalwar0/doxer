@@ -443,6 +443,34 @@ def _inst_threshold():
     assert config.INSTITUTION_MIN_SCORE <= config.SCORE_STRONG + 0.1
 
 
+@check("scored images are ranked and filterable")
+def _ranked_images():
+    import time
+    import uuid
+
+    from doxer import db
+
+    db.init()
+    sid = db.create_session("imgtest", {}, "", ["school"])
+    try:
+        for score, name in ((0.12, "a"), (0.61, "b"), (0.33, "c")):
+            db.add_session_profile(sid, f"school_{name}", platform="web",
+                                   username=f"http://{name}.test", full_name=name.upper(),
+                                   n_faces=3, best_score=score, rank_score=score)
+            db.add_session_check(sid, profile_id=f"school_{name}", image_path=f"http://{name}/1.jpg",
+                                 best_score=score, n_faces=3, matched=score >= 0.55)
+        rows, total = db.top_session_images(sid, min_score=0.0, limit=10)
+        assert total == 3 and len(rows) == 3, f"expected 3 rows, got {total}/{len(rows)}"
+        scores = [r["best_score"] for r in rows]
+        assert scores == sorted(scores, reverse=True), f"not ranked: {scores}"
+        assert rows[0]["institution"] == "B", "best row must carry the institution name"
+
+        filtered, ftotal = db.top_session_images(sid, min_score=0.45, limit=10)
+        assert ftotal == 1 and filtered[0]["best_score"] == 0.61, "min_score filter failed"
+    finally:
+        db.delete_session(sid)
+
+
 # --------------------------------------------------------------------- main
 
 

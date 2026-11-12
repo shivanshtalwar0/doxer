@@ -111,9 +111,11 @@ Notes on the design:
   website for most.
 - **The name is context, not a filter.** Matching is by face; the name is
   recorded with the hit so you can confirm it.
-- **High-confidence only.** Gallery photos are group shots at mixed resolution,
-  so ``INSTITUTION_MIN_SCORE`` (0.55) gates what is shown. Raise it to 0.60 to
-  see only STRONG matches.
+- **Results are the scored images, not the schools.** A school's headline
+  score hides which photo actually matched, so the results grid shows every
+  image that contained a face, best first, with its score and institution.
+  Filter chips (all / 30%+ / 45%+ / 55%+) narrow it; click a tile to open the
+  original.
 - Gallery crawling is bounded (pages per site, images per site) and stays on
   the institution's own host. Expired certificates on small-school sites are
   tolerated: the crawl only reads public images.
